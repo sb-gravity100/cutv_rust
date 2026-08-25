@@ -2,15 +2,17 @@
 
 Per-phase task lists and done criteria. Check off as completed; keep in sync with `PLAN.md`/`FILE_INDEX.md`.
 
-## Phase 0 — libmpv embedding spike (blocking, do first)
+## Phase 0 — libmpv embedding spike (DONE 2026-08-25)
 
 Goal: prove mpv can render into a child window inside the eframe window before committing to ripping out `video.rs`/`audio.rs`.
 
-- [ ] Add `libmpv2` dependency, confirm it builds/links against a local libmpv on this machine.
-- [ ] Get the raw HWND of the eframe window via `raw-window-handle`.
-- [ ] Create a native Win32 child window sized/positioned to the video rect, hand its HWND to mpv as `wid`.
-- [ ] Confirm playback renders correctly inside the eframe window, resizes/repositions correctly as the child window moves, and doesn't fight egui's own repaint loop.
-- **Done when:** a throwaway build shows a video playing embedded in the app window. If this doesn't work cleanly, stop and fall back to keeping the current ffmpeg-pipe pipeline (`video.rs`/`audio.rs`) and layer the Phase 2+ features on top of it instead.
+- [x] Confirm a libmpv build is available on this machine: `C:\cli_tools\scripts\py\cutv\libmpv-2.dll` (no MSVC import lib ships with it).
+- [x] Load libmpv at **runtime** instead of link-time: `libmpv2`/`libmpv-rs` require an MSVC import lib that doesn't exist for this DLL, so `src/bin/mpv_spike.rs` uses `LoadLibraryW`/`GetProcAddress` on `mpv_create`/`mpv_initialize`/`mpv_set_option_string`/`mpv_command_string`/`mpv_terminate_destroy` — the same approach `python-mpv` takes via `ctypes`. This is the pattern `player.rs` will use in Phase 1.
+- [x] Create a native Win32 **child** window (not just a top-level one) and hand its HWND to mpv via the `wid` option — proven with a real WS_CHILD window, not simulated.
+- [x] Confirm playback renders correctly inside the child region only (a bottom "controls" strip painted separately stayed untouched by mpv), and that resizing the parent (`WM_SIZE` → `SetWindowPos` on the child) correctly repositions/resizes the embedded video. Confirmed working by the user.
+- [ ] Still open for Phase 1: get the raw HWND of the *actual* eframe/winit window (this spike used a hand-rolled Win32 window standing in for it) via `raw-window-handle`, and confirm mpv's child window doesn't fight eframe/glutin's own GL surface/repaint loop.
+- **Result:** spike succeeded — proceeding to Phase 1. `src/bin/mpv_spike.rs` stays in the tree as a reference/regression check for the embedding technique; not part of the shipped app (not wired into `main.rs`).
+- **Open question carried to Phase 1:** how to distribute `libmpv-2.dll` with the real app (bundle vs. require a local mpv/libmpv install vs. read a configurable path) — not decided yet, spike currently points at the external reference project's copy.
 
 ## Phase 1 — player.rs migration (depends on Phase 0)
 

@@ -13,7 +13,13 @@
 
 Decided (see conversation 2026-08-25): replace `video.rs` (`VideoDecoder`/`SeekWorker`/`spawn_proxy`) and `audio.rs` with a single `player.rs` wrapping libmpv.
 
-Key technical risk: eframe/winit has no native child-HWND API like Tk's `wid`. mpv needs a raw window handle to render into. Plan: get the raw HWND of the eframe window via `raw-window-handle`, create a native Win32 child window sized/positioned to the video rect each frame, hand that HWND to mpv as `wid`. **Spike this in isolation before ripping out `video.rs`/`audio.rs`** — if it doesn't work cleanly, fall back to keeping the current ffmpeg-pipe pipeline and layer new features on top of it instead.
+**Why this became urgent, not just planned:** the ffmpeg-pipe pipeline hit two complaints that directly trade off against each other and can't both be fixed by tuning it further — sharper decode resolution makes timeline scrubbing slower (each scrub position spawns a whole new `ffmpeg` process), and faster scrubbing needs lower resolution. There's no tuning path to "Premiere-level" scrub smoothness with a process-per-seek model; it requires a player that keeps a live decoder + demuxer cache open, which is what mpv is.
+
+**Phase 0 spike (done 2026-08-25):** see `PHASES.md`. Confirmed mpv can render into a native Win32 child window embedded inside an app window, with correct resize behavior, using **runtime-loaded libmpv** (`LoadLibraryW`/`GetProcAddress`, not link-time linking — no MSVC import lib exists for the available `libmpv-2.dll`). `src/bin/mpv_spike.rs` has the proof.
+
+Remaining risk carried into Phase 1: the spike used a hand-rolled Win32 window standing in for the app window. Still need to confirm mpv's child window coexists cleanly with eframe/glutin's actual GL surface and repaint loop (get the real window's HWND via `raw-window-handle` instead of creating our own).
+
+**Open question:** how to distribute `libmpv-2.dll` with the real app (bundle it, require a local mpv/libmpv install, or a configurable path). Not decided — revisit before Phase 1 is considered done.
 
 Consequence for crop UI: mpv paints directly into its own native child window, so egui can't draw a crop rubber-band *on top of* the video texture (there is no texture anymore). Needs a separate topmost native overlay window positioned over mpv's child window (mirrors the Python reference's color-keyed Tk `Toplevel`, or on Windows a layered window with `SetLayeredWindowAttributes` for real per-pixel alpha instead of color-keying).
 

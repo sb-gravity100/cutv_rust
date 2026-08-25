@@ -18,9 +18,11 @@ File system index with tags and one-line descriptions. Update whenever files are
 - `probe.rs` — `[ffmpeg][metadata]` `probe_video` (ffprobe → duration/fps/width/height), `encode_args` (source-codec-aware ffmpeg encoder args for the final cut, CPU only today).
 - `util.rs` — `[helpers]` `fmt_tc` (timecode formatting), `parse_fps` (ffprobe `"num/den"` parser).
 
+- `bin/mpv_spike.rs` — `[spike][throwaway]` Phase 0 proof that libmpv can render into a native Win32 child window embedded in an app window. Not wired into `main.rs`; run directly via `cargo run --bin mpv_spike -- <libmpv-2.dll path> <video path>`. Kept as a reference for the technique (runtime-loaded libmpv via `LoadLibraryW`/`GetProcAddress`) that `player.rs` will use.
+
 ## Planned / not yet created
 
-- `player.rs` — `[playback]` libmpv wrapper replacing `video.rs` + `audio.rs`; embeds mpv into a native child window inside the eframe window.
+- `player.rs` — `[playback]` libmpv wrapper replacing `video.rs` + `audio.rs`; embeds mpv into a native child window inside the eframe window, using the runtime-loading technique proven in `bin/mpv_spike.rs`.
 - `crop.rs` — `[feature]` crop rubber-band state + coordinate mapping + overlay window.
 - `gif.rs` — `[feature]` two-pass GIF export (palette generation + paletteuse).
 
