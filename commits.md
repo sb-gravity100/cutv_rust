@@ -2,6 +2,15 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `09c5ea1` · 2026-09-19 · build: add ffmpeg-next dependency and vcpkg FFmpeg toolchain
+- `Cargo.lock`
+- `Cargo.toml`
+- `.cargo/config.toml`
+
+### `e914273` · 2026-09-19 · fix: resolve mpv autoplay, pause-flicker, backward-step lag, and audio-blip bugs
+- `src/player.rs`
+- `src/app.rs`
+
 ### `e1d1482` · 2026-09-19 · feat: Phase 1 libmpv migration — replace video.rs/audio.rs with player.rs
 - `Cargo.lock`
 - `Cargo.toml`
