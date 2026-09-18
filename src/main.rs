@@ -1,8 +1,8 @@
 mod app;
-mod audio;
+mod player;
 mod probe;
+mod thumbs;
 mod util;
-mod video;
 
 use anyhow::{bail, ensure, Result};
 use log::debug;

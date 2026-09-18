@@ -2,6 +2,7 @@
 name = "cutv_rust"
 version = "0.1.0"
 edition = "2024"
+default-run = "cutv_rust"
 
 [dependencies]
 eframe      = "0.29"
@@ -18,6 +19,7 @@ windows     = { version = "0.58", features = [
     "Win32_System_LibraryLoader",
     "Win32_Graphics_Gdi",
 ] }
+raw-window-handle = "0.6"
 
 [profile.release]
 opt-level       = 3

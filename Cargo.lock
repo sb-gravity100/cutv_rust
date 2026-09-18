@@ -978,6 +978,7 @@ dependencies = [
  "egui",
  "env_logger",
  "log",
+ "raw-window-handle",
  "rodio",
  "serde_json",
  "windows 0.58.0",

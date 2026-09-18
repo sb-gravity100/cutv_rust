@@ -1,6 +1,5 @@
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -10,11 +9,12 @@ use egui::{
     Sense, Stroke, Vec2, pos2, vec2,
 };
 use log::debug;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-use crate::audio::AudioPlayer;
+use crate::player::Player;
 use crate::probe::encode_args;
+use crate::thumbs::{ThumbData, spawn_thumbs};
 use crate::util::fmt_tc;
-use crate::video::{FrameData, SeekWorker, ThumbData, VideoDecoder, spawn_proxy, spawn_thumbs};
 
 // ── Palette ───────────────────────────────────────────────────────────────────
 
@@ -53,33 +53,22 @@ enum CutResult { Done(String), Err(String) }
 
 pub struct CutvApp {
     ctx:      egui::Context,
-    path:     String,       // original source — always used for do_cut(); used for playback too when proxy is off
-    proxy_path:      String,
-    proxy_ready:     std::sync::Arc<std::sync::atomic::AtomicBool>,
-    proxy_building:  bool,   // whether the background proxy transcode has been kicked off
-    use_proxy:       bool,   // off by default — play/seek/thumbnail straight from source
-    ready:           bool,   // can playback start right now (source: instant; proxy: waits for proxy_ready)
+    path:     String,       // original source — used for playback (Player) and do_cut()
     duration: f64,
     fps:      f64,
-    dw:       u32,       // decode/proxy resolution — fixed, unrelated to on-screen size
-    dh:       u32,
     src_w:    u32,       // original source dimensions — used for display aspect ratio
     src_h:    u32,
     transport_w: f32,    // remembered width of the transport button row, for centering
 
-    playing: bool,
-    cur_t:   f64,
+    player: Option<Player>, // None until the first update() tick resolves the window handle
+
+    cur_t:   f64,        // mirrors player.position each frame; authoritative between polls
     in_t:    f64,
     out_t:   f64,
     muted:   bool,
 
-    decoder:        Option<VideoDecoder>,
-    seeker:         SeekWorker,
-    frame_tex:      Option<egui::TextureHandle>,
     thumb_texs:     Vec<(f64, egui::TextureHandle)>,
     pending_thumbs: Arc<Mutex<Vec<ThumbData>>>,
-
-    audio:  Option<AudioPlayer>,
 
     tl_drag: Option<Drag>,
 
@@ -102,150 +91,52 @@ impl CutvApp {
         src_h: u32,
         ctx: egui::Context,
     ) -> Self {
-        const MAX_W: u32 = 640;
-        const MAX_H: u32 = 360;
-        let scale = (MAX_W as f64 / src_w as f64)
-            .min(MAX_H as f64 / src_h as f64)
-            .min(1.0);
-        let dw = (src_w as f64 * scale) as u32;
-        let dh = (src_h as f64 * scale) as u32;
-        debug!("display {dw}x{dh}  fps={fps:.3}  dur={duration:.3}s");
+        debug!("src {src_w}x{src_h}  fps={fps:.3}  dur={duration:.3}s");
 
-        let proxy_path = std::env::temp_dir()
-            .join(format!("cutv_{}_proxy.mp4", std::process::id()))
-            .to_string_lossy()
-            .into_owned();
-
-        // Proxy is off by default: play straight from source, no transcode
-        // wait. Thumbs and initial seek fire on the first update() tick.
-        let pending_thumbs = Arc::new(Mutex::new(Vec::new()));
-        let seeker = SeekWorker::spawn(ctx.clone());
-
-        let audio = AudioPlayer::new(&path);
+        let pending_thumbs = spawn_thumbs(path.clone(), duration, ctx.clone());
 
         CutvApp {
             ctx,
             path,
-            proxy_path,
-            proxy_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            proxy_building: false,
-            use_proxy: false,
-            ready: false,
             duration,
             fps,
-            dw,
-            dh,
             src_w,
             src_h,
             transport_w: 280.0,
-            playing: false,
+            player: None,
             cur_t: 0.0,
             in_t: 0.0,
             out_t: duration,
             muted: false,
-            decoder: None,
-            seeker,
-            frame_tex: None,
             thumb_texs: Vec::new(),
             pending_thumbs,
-            audio,
             tl_drag: None,
             crop_mode: false,
             frame_hold_dir: 0,
             next_hold_tick: 0.0,
-            status: "Loading...".into(),
+            status: "Loading player...".into(),
             cut_progress: 0.0,
             cut_result: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    // ── Playback source ───────────────────────────────────────────────────────
-
-    fn active_path(&self) -> String {
-        if self.use_proxy { self.proxy_path.clone() } else { self.path.clone() }
-    }
-
-    /// Toggle proxy playback on/off. Off (default) plays/seeks straight from
-    /// the source. On kicks off (or reuses) the background proxy transcode
-    /// and switches to it once ready — useful for heavy/high-bitrate sources
-    /// where decoding the original on every seek is too slow.
-    fn toggle_use_proxy(&mut self) {
-        self.use_proxy = !self.use_proxy;
-        debug!("use_proxy={}", self.use_proxy);
-
-        if self.use_proxy && !self.proxy_building {
-            self.proxy_building = true;
-            self.proxy_ready = spawn_proxy(self.path.clone(), self.proxy_path.clone(), self.dw, self.dh).ready;
-        }
-
-        let now_ready = !self.use_proxy || self.proxy_ready.load(Ordering::Relaxed);
-        self.ready = now_ready;
-        self.status = match (self.use_proxy, now_ready) {
-            (true, true)   => "proxy on".into(),
-            (true, false)  => "building proxy...".into(),
-            (false, _)     => "proxy off — using source".into(),
-        };
-
-        if self.playing {
-            self.playing = false;
-            if let Some(d) = &mut self.decoder { d.stop(); }
-            self.decoder = None;
-            if let Some(a) = &self.audio { a.pause(); }
-        }
-
-        if now_ready {
-            let path = self.active_path();
-            self.thumb_texs.clear();
-            self.pending_thumbs = spawn_thumbs(path.clone(), self.duration, self.ctx.clone());
-            self.seeker.request(&path, self.cur_t, self.dw, self.dh);
         }
     }
 
     // ── Playback controls ─────────────────────────────────────────────────────
 
     fn toggle_play(&mut self) {
-        if !self.ready { return; }
-        self.playing = !self.playing;
-        if self.playing {
-            debug!("play from {:.3}s", self.cur_t);
-            let path = self.active_path();
-            self.decoder = Some(VideoDecoder::spawn(
-                &path, self.cur_t, self.dw, self.dh, self.fps,
-                self.ctx.clone(),
-            ));
-            if let Some(a) = &mut self.audio { a.play(self.cur_t); }
-        } else {
-            debug!("pause at {:.3}s", self.cur_t);
-            if let Some(d) = &mut self.decoder { d.stop(); }
-            self.decoder = None;
-            if let Some(a) = &self.audio { a.pause(); }
-        }
+        let Some(player) = &mut self.player else { return; };
+        if player.paused { player.play(); } else { player.pause(); }
     }
 
     fn seek(&mut self, t: f64) {
-        if !self.ready { return; }
+        let Some(player) = &self.player else { return; };
         let t = t.clamp(0.0, self.duration);
-        let was_playing = self.playing;
-        if was_playing {
-            self.playing = false;
-            if let Some(d) = &mut self.decoder { d.stop(); }
-            self.decoder = None;
-            if let Some(a) = &self.audio { a.pause(); }
-        }
-        self.cur_t = t;
-        let path = self.active_path();
-        self.seeker.request(&path, t, self.dw, self.dh);
-        if was_playing {
-            self.playing = true;
-            self.decoder = Some(VideoDecoder::spawn(
-                &path, t, self.dw, self.dh, self.fps, self.ctx.clone(),
-            ));
-            if let Some(a) = &mut self.audio { a.play(t); }
-        }
+        player.seek(t);
+        self.cur_t = t; // optimistic; corrected by the next poll() if mpv lands elsewhere
     }
 
     fn step_frames(&mut self, n: i32) {
-        self.seek(self.cur_t + n as f64 / self.fps);
+        let Some(player) = &mut self.player else { return; };
+        player.step_frames(n);
     }
 
     /// Drives frame-by-frame hold-to-repeat for both the comma/period keys
@@ -293,7 +184,7 @@ impl CutvApp {
 
     fn toggle_mute(&mut self) {
         self.muted = !self.muted;
-        if let Some(a) = &mut self.audio { a.set_mute(self.muted); }
+        if let Some(player) = &self.player { player.set_mute(self.muted); }
     }
 
     // TODO(Phase 3): wire to a real crop overlay + rect state.
@@ -316,7 +207,9 @@ impl CutvApp {
             self.status = "IN/OUT too close (< 0.1 s)".into();
             return;
         }
-        if self.playing { self.toggle_play(); }
+        if let Some(player) = &mut self.player {
+            if !player.paused { player.pause(); }
+        }
 
         let p      = Path::new(&self.path);
         let stem   = p.file_stem().unwrap_or_default().to_string_lossy();
@@ -382,14 +275,6 @@ impl CutvApp {
         else { Drag::Pos }
     }
 
-    fn update_frame_tex(&mut self, ctx: &egui::Context, f: &FrameData) {
-        let img = egui::ColorImage::from_rgb([f.w as usize, f.h as usize], &f.rgb);
-        match &mut self.frame_tex {
-            Some(t) => t.set(img, egui::TextureOptions::LINEAR),
-            None    => self.frame_tex = Some(ctx.load_texture("frame", img, egui::TextureOptions::LINEAR)),
-        }
-    }
-
     // ── Separator helper ──────────────────────────────────────────────────────
 
     fn hsep(ui: &mut egui::Ui) {
@@ -398,67 +283,51 @@ impl CutvApp {
     }
 }
 
-impl Drop for CutvApp {
-    fn drop(&mut self) {
-        let p = std::path::Path::new(&self.proxy_path);
-        if p.exists() {
-            let _ = std::fs::remove_file(p);
-            debug!("proxy removed: {}", self.proxy_path);
-        }
-    }
-}
-
 // ── egui App trait ────────────────────────────────────────────────────────────
 
 impl eframe::App for CutvApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
 
-        // ── Become ready once the active source can be played ──────────────────
-        // Proxy off (default): ready on the very first tick. Proxy on: wait
-        // for the background transcode.
-        if !self.ready && (!self.use_proxy || self.proxy_ready.load(Ordering::Relaxed)) {
-            self.ready = true;
-            debug!("ready, starting thumbs + initial seek");
-            let path = self.active_path();
-            self.pending_thumbs = spawn_thumbs(path.clone(), self.duration, ctx.clone());
-            self.seeker.request(&path, 0.0, self.dw, self.dh);
-            let audio_ready = self.audio.as_ref()
-                .map_or(false, |a| a.ready.load(Ordering::Relaxed));
-            self.status = if audio_ready {
-                "Space play  ←→ ±5s  ,. ±1f  I/O in/out  M mute  Enter cut".into()
-            } else {
-                "Loading audio...".into()
-            };
-        }
-
-        // ── Poll seek preview ─────────────────────────────────────────────────
-        // Only update the displayed texture here, not cur_t: seek() already
-        // sets cur_t synchronously the moment the user clicks/drags, and
-        // this result can arrive well after later requests superseded it
-        // (rapid dragging queues many requests; only the latest survives).
-        // Overwriting cur_t with this frame's now-stale timestamp is what
-        // made the timecode/playhead jerk backward while scrubbing.
-        if let Some(f) = self.seeker.poll() {
-            self.update_frame_tex(ctx, &f);
-        }
-
-        // ── Poll decoder frames ───────────────────────────────────────────────
-        if self.playing {
-            let mut eos = false;
-            if let Some(decoder) = &self.decoder {
-                match decoder.rx.try_recv() {
-                    Ok(Some(f)) => { self.cur_t = f.ts; self.update_frame_tex(ctx, &f); }
-                    Ok(None)    => { eos = true; }
-                    Err(_)      => {}
+        // ── Lazily create the player once we can resolve the real window handle ──
+        if self.player.is_none() {
+            match frame.window_handle() {
+                Ok(wh) => match wh.as_raw() {
+                    RawWindowHandle::Win32(h) => {
+                        let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
+                        match Player::new(hwnd, (0, 0, 16, 16), &self.path) {
+                            Ok(p) => {
+                                self.player = Some(p);
+                                self.status =
+                                    "Space play  ←→ ±5s  ,. ±1f  I/O in/out  M mute  Enter cut".into();
+                                debug!("player ready");
+                            }
+                            Err(e) => {
+                                log::error!("player init failed: {e}");
+                                self.status = format!("player error: {e}");
+                            }
+                        }
+                    }
+                    _ => {
+                        self.status = "player error: not a Win32 window".into();
+                    }
+                },
+                Err(e) => {
+                    // Window not fully realized yet — retry next frame.
+                    debug!("window handle not ready yet: {e}");
                 }
             }
-            if eos {
-                debug!("decoder EOF — stopping playback");
-                self.playing = false;
-                self.decoder = None;
-                if let Some(a) = &self.audio { a.pause(); }
+        }
+
+        // ── Poll player state ─────────────────────────────────────────────────
+        if let Some(player) = &mut self.player {
+            player.poll();
+            self.cur_t = player.position;
+            if player.duration > 0.0 {
+                self.duration = player.duration;
             }
-            if self.playing { ctx.request_repaint(); }
+            if !player.paused {
+                ctx.request_repaint();
+            }
         }
 
         // ── Poll pending thumbnails ───────────────────────────────────────────
@@ -470,13 +339,6 @@ impl eframe::App for CutvApp {
                     format!("th{}", td.t as u32), img, egui::TextureOptions::LINEAR,
                 );
                 self.thumb_texs.push((td.t, tex));
-            }
-        }
-
-        // ── Check audio ready ─────────────────────────────────────────────────
-        if self.status == "Loading audio..." {
-            if self.audio.as_ref().map_or(false, |a| a.ready.load(Ordering::Relaxed)) {
-                self.status = "Space play  ←→ ±5s  ,. ±1f  I/O in/out  M mute  Enter cut".into();
             }
         }
 
@@ -521,6 +383,7 @@ impl eframe::App for CutvApp {
         };
 
         // ── Draw UI ───────────────────────────────────────────────────────────
+        let pixels_per_point = ctx.pixels_per_point();
         egui::CentralPanel::default()
             .frame(Frame::none()
                 .fill(BG)
@@ -529,7 +392,7 @@ impl eframe::App for CutvApp {
                 ui.spacing_mut().item_spacing   = Vec2::ZERO;
                 ui.spacing_mut().button_padding = vec2(10.0, 7.0);
 
-                self.ui_video(ui);
+                self.ui_video(ui, pixels_per_point);
                 self.ui_timeline(ui);
                 CutvApp::hsep(ui);
                 ui.add_space(7.0);
@@ -552,11 +415,12 @@ impl eframe::App for CutvApp {
 // ── UI sections ───────────────────────────────────────────────────────────────
 
 impl CutvApp {
-    fn ui_video(&mut self, ui: &mut egui::Ui) {
+    fn ui_video(&mut self, ui: &mut egui::Ui, pixels_per_point: f32) {
         // Fill whatever space is left above the fixed-height chrome below,
-        // letterboxing to preserve the source aspect ratio. The texture
-        // itself stays at the fixed decode resolution (self.dw/self.dh) —
-        // only its on-screen rect grows/shrinks with the window.
+        // letterboxing to preserve the source aspect ratio. mpv renders
+        // directly into its own native child window at this screen
+        // location — egui just reserves the space and tells Player where
+        // that window should be (in physical pixels).
         let avail_w = ui.available_width();
         let avail_h = (ui.available_height() - CHROME_H).max(50.0);
         let scale = (avail_w / self.src_w as f32).min(avail_h / self.src_h as f32);
@@ -566,12 +430,13 @@ impl CutvApp {
         let (outer, _) = ui.allocate_exact_size(vec2(avail_w, avail_h), Sense::hover());
         ui.painter().rect_filled(outer, 0.0, BG_DRK);
         let rect = Rect::from_center_size(outer.center(), vec2(disp_w, disp_h));
-        ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
-        if let Some(tex) = &self.frame_tex {
-            ui.painter().image(
-                tex.id(), rect,
-                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                Color32::WHITE,
+
+        if let Some(player) = &self.player {
+            player.set_rect(
+                (rect.left()   * pixels_per_point).round() as i32,
+                (rect.top()    * pixels_per_point).round() as i32,
+                (rect.width()  * pixels_per_point).round() as i32,
+                (rect.height() * pixels_per_point).round() as i32,
             );
         }
     }
@@ -666,12 +531,12 @@ impl CutvApp {
         let pad   = ((avail - self.transport_w) * 0.5).max(0.0);
 
         let mut btn_dir = 0;
+        let playing = self.player.as_ref().map_or(false, |p| !p.paused);
         let resp = ui.horizontal(|ui| {
             ui.add_space(pad);
 
             let cur = self.cur_t;
             let dur = self.duration;
-            let playing = self.playing;
 
             if tbtn(ui, "|◀") .clicked() { self.seek(0.0); }
             if tbtn(ui, "◀◀") .clicked() { self.seek(cur - 5.0); }
@@ -726,10 +591,6 @@ impl CutvApp {
                 let mute_lbl = if self.muted { "Muted" } else { "Sound" };
                 let mute_fg  = if self.muted { C_OUT } else { TXT_DIM };
                 if cbtn(ui, mute_lbl, mute_fg).clicked() { self.toggle_mute(); }
-
-                ui.add_space(4.0);
-                let proxy_fg = if self.use_proxy { TXT } else { TXT_DIM };
-                if cbtn(ui, "PROXY", proxy_fg).clicked() { self.toggle_use_proxy(); }
 
                 ui.add_space(4.0);
                 if cbtn(ui, "GIF", TXT_DIM).clicked() { self.do_gif(); }
