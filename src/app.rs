@@ -153,9 +153,21 @@ impl CutvApp {
             self.step_frames(dir);
             self.next_hold_tick = now + 0.35; // initial delay before repeat kicks in
         } else if now >= self.next_hold_tick {
-            self.step_frames(dir);
-            let interval = (2.5 / self.fps.max(1.0)).max(0.03);
-            self.next_hold_tick = now + interval;
+            // Backward stepping goes through a precise seek (see
+            // Player::step_frames), which — like all seeks — is async in
+            // mpv with no completion signal from a fire-and-forget command.
+            // Skip issuing another one until mpv reports the previous seek
+            // has actually landed, or repeats queue up faster than mpv can
+            // finish them and keep "catching up" after input stops.
+            let still_seeking = dir < 0
+                && self.player.as_ref().is_some_and(Player::is_seeking);
+            if still_seeking {
+                debug!("frame hold: skip repeat, still seeking");
+            } else {
+                self.step_frames(dir);
+                let interval = (2.5 / self.fps.max(1.0)).max(0.03);
+                self.next_hold_tick = now + interval;
+            }
         }
         ctx.request_repaint();
     }
@@ -184,7 +196,7 @@ impl CutvApp {
 
     fn toggle_mute(&mut self) {
         self.muted = !self.muted;
-        if let Some(player) = &self.player { player.set_mute(self.muted); }
+        if let Some(player) = &mut self.player { player.set_mute(self.muted); }
     }
 
     // TODO(Phase 3): wire to a real crop overlay + rect state.
@@ -294,7 +306,7 @@ impl eframe::App for CutvApp {
                 Ok(wh) => match wh.as_raw() {
                     RawWindowHandle::Win32(h) => {
                         let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
-                        match Player::new(hwnd, (0, 0, 16, 16), &self.path) {
+                        match Player::new(hwnd, (0, 0, 16, 16), &self.path, self.fps) {
                             Ok(p) => {
                                 self.player = Some(p);
                                 self.status =

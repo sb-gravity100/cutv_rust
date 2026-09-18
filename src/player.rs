@@ -45,6 +45,15 @@ pub struct Player {
     fn_get_property: MpvGetProperty,
     fn_terminate:    MpvTerminateDestroy,
 
+    fps: f64,
+    // The "pause" option/command race described in `new()`: set once the
+    // file has actually finished loading (first time `duration` is known),
+    // to force the real starting-paused state mpv otherwise drops.
+    pending_pause: bool,
+    // Caller's actual mute preference, independent of the transient mute
+    // step_frames() applies for the duration of frame stepping.
+    want_mute: bool,
+
     pub duration: f64,
     pub position: f64,
     pub paused:   bool,
@@ -55,8 +64,9 @@ impl Player {
     /// `eframe::Frame::window_handle()`). `rect`: (x, y, w, h) in physical
     /// pixels, relative to the parent's client area — reposition every
     /// frame via `set_rect` as the video panel's on-screen rect changes.
-    /// `path`: video file to load, starting paused.
-    pub fn new(parent: HWND, rect: (i32, i32, i32, i32), path: &str) -> Result<Self, String> {
+    /// `path`: video file to load, starting paused. `fps`: source frame
+    /// rate, used to convert 1-frame steps into precise seek offsets.
+    pub fn new(parent: HWND, rect: (i32, i32, i32, i32), path: &str, fps: f64) -> Result<Self, String> {
         let dll = dll_path();
         unsafe {
             let wide: Vec<u16> = dll.encode_utf16().chain(std::iter::once(0)).collect();
@@ -129,6 +139,13 @@ impl Player {
 
             let cmd = CString::new(format!("loadfile \"{path}\"")).unwrap();
             mpv_command(mpv, cmd.as_ptr());
+            // The "pause" option only sets mpv's *initial* state, and does
+            // NOT reliably stick through the loadfile command above — mpv
+            // starts playing the newly loaded file regardless, because
+            // "pause" only applies once the file has actually finished
+            // loading and loadfile is asynchronous. `pending_pause` below
+            // re-forces it once we observe the file is actually ready
+            // (first time `duration` is known, in `poll()`).
 
             debug!("player: mpv embedded, child hwnd={hwnd:?}");
 
@@ -138,6 +155,9 @@ impl Player {
                 fn_command: mpv_command,
                 fn_get_property: mpv_get_property,
                 fn_terminate: mpv_terminate,
+                fps: fps.max(1.0),
+                pending_pause: true,
+                want_mute: false,
                 duration: 0.0,
                 position: 0.0,
                 paused: true,
@@ -156,6 +176,10 @@ impl Player {
     pub fn play(&mut self) {
         self.command("set pause no");
         self.paused = false;
+        // step_frames() force-mutes for the duration of frame stepping (see
+        // below); resuming real playback restores whatever mute state the
+        // caller actually wants.
+        self.set_mute(self.want_mute);
     }
 
     pub fn pause(&mut self) {
@@ -167,18 +191,55 @@ impl Player {
         self.command(&format!("seek {t:.3} absolute exact"));
     }
 
-    /// mpv only steps cleanly while paused.
-    pub fn step_frames(&mut self, n: i32) {
-        if !self.paused {
-            self.pause();
-        }
-        let cmd = if n >= 0 { "frame-step" } else { "frame-back-step" };
-        for _ in 0..n.abs() {
-            self.command(cmd);
+    /// True while mpv is still processing a seek issued via `seek()` /
+    /// the backward branch of `step_frames()`. Used to avoid queuing
+    /// another step/seek command before the previous one has actually
+    /// landed — mpv_command_string is fire-and-forget with no completion
+    /// signal, and issuing commands faster than mpv can finish them just
+    /// builds a backlog that keeps "catching up" well after input stops.
+    pub fn is_seeking(&self) -> bool {
+        unsafe {
+            let mut flag: c_int = 0;
+            let name = CString::new("seeking").unwrap();
+            if (self.fn_get_property)(self.mpv, name.as_ptr(), MPV_FORMAT_FLAG, &mut flag as *mut _ as *mut c_void) >= 0 {
+                flag != 0
+            } else {
+                false
+            }
         }
     }
 
-    pub fn set_mute(&self, m: bool) {
+    /// mpv only steps cleanly while paused.
+    pub fn step_frames(&mut self, n: i32) {
+        debug!("step_frames n={n}  pos={:.3}", self.position);
+        if !self.paused {
+            self.pause();
+        }
+        // frame-step's implementation briefly unpauses mpv to actually
+        // render the next frame, which lets a blip of audio through even
+        // though we're conceptually still "paused" for stepping. Mute for
+        // the duration; play() restores the real mute preference.
+        self.command("set mute yes");
+        if n >= 0 {
+            for _ in 0..n {
+                self.command("frame-step");
+            }
+        } else {
+            // `frame-back-step` is dramatically slower than `frame-step`:
+            // per mpv's own docs it seeks to *before* the target and then
+            // steps forward frame-by-frame to land exactly 1 frame back,
+            // rather than just seeking straight to the target. A precise
+            // seek to the target timestamp reaches the same frame without
+            // that redundant forward-stepping, and lands in roughly the
+            // same time as a forward frame-step.
+            let target = (self.position - (n.unsigned_abs() as f64) / self.fps).max(0.0);
+            self.seek(target);
+            self.position = target; // optimistic; corrected by the next poll()
+        }
+    }
+
+    pub fn set_mute(&mut self, m: bool) {
+        self.want_mute = m;
         self.command(if m { "set mute yes" } else { "set mute no" });
     }
 
@@ -194,7 +255,17 @@ impl Player {
         }
     }
 
-    /// Refresh position/duration/pause state from mpv. Call once per frame.
+    /// Refresh position/duration from mpv. Call once per frame.
+    ///
+    /// Deliberately does NOT read back the "pause" property: mpv's
+    /// `frame-step`/`frame-back-step` commands internally unpause for one
+    /// frame's presentation then re-pause, and polling faster than that
+    /// cycle (egui repaints far more often than the frame-hold repeat rate)
+    /// catches the transient unpaused state, making the Play/Pause button
+    /// flicker during a held frame-step. `paused` is instead tracked
+    /// authoritatively on the Rust side by play()/pause()/step_frames() —
+    /// safe since mpv's OSC/input bindings are disabled, so nothing else
+    /// can change pause state out from under us.
     pub fn poll(&mut self) {
         unsafe {
             let mut pos: c_double = 0.0;
@@ -206,13 +277,12 @@ impl Player {
             let mut dur: c_double = 0.0;
             let name = CString::new("duration").unwrap();
             if (self.fn_get_property)(self.mpv, name.as_ptr(), MPV_FORMAT_DOUBLE, &mut dur as *mut _ as *mut c_void) >= 0 && dur > 0.0 {
+                let was_loading = self.duration <= 0.0;
                 self.duration = dur;
-            }
-
-            let mut flag: c_int = 0;
-            let name = CString::new("pause").unwrap();
-            if (self.fn_get_property)(self.mpv, name.as_ptr(), MPV_FORMAT_FLAG, &mut flag as *mut _ as *mut c_void) >= 0 {
-                self.paused = flag != 0;
+                if was_loading && self.pending_pause {
+                    self.pending_pause = false;
+                    self.command("set pause yes");
+                }
             }
         }
     }
