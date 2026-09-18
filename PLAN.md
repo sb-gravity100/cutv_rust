@@ -4,22 +4,21 @@
 
 - Rust 2024 edition.
 - UI: `eframe`/`egui` 0.29 — immediate-mode GUI, custom-painted (no OS-native widgets).
-- Playback (current): raw-RGB24 frames piped from `ffmpeg` subprocess + `rodio` for audio, kept in sync manually via shared timestamps. Requires an H.264 proxy transcode of the source for responsive scrubbing.
-- Playback (target): embedded **libmpv** via the `libmpv2` crate (maintained fork of the abandoned `libmpv-rs`). mpv owns decode, GPU render, audio output, and clocking as one unit — no proxy, no manual A/V sync.
+- Playback: embedded **libmpv**, loaded at runtime (`LoadLibraryW`/`GetProcAddress` — not the `libmpv2`/`libmpv-rs` crates, which need an MSVC import lib that doesn't exist for the available DLL). mpv owns decode, GPU render, audio output, and clocking as one unit — no proxy, no manual A/V sync. See `src/player.rs`.
 - Export/encode/probe: shells out to `ffmpeg`/`ffprobe` (must be on `PATH`, not vendored).
 - No test suite.
 
 ## Architecture decision: libmpv migration
 
-Decided (see conversation 2026-08-25): replace `video.rs` (`VideoDecoder`/`SeekWorker`/`spawn_proxy`) and `audio.rs` with a single `player.rs` wrapping libmpv.
+Decided (see conversation 2026-08-25): replace `video.rs` (`VideoDecoder`/`SeekWorker`/`spawn_proxy`) and `audio.rs` with a single `player.rs` wrapping libmpv. **Done 2026-09-19** — `video.rs`/`audio.rs` removed, `player.rs` + `thumbs.rs` in place, `app.rs`/`main.rs` wired up, builds clean. Not yet run against a real video (see `PHASES.md` Phase 1).
 
 **Why this became urgent, not just planned:** the ffmpeg-pipe pipeline hit two complaints that directly trade off against each other and can't both be fixed by tuning it further — sharper decode resolution makes timeline scrubbing slower (each scrub position spawns a whole new `ffmpeg` process), and faster scrubbing needs lower resolution. There's no tuning path to "Premiere-level" scrub smoothness with a process-per-seek model; it requires a player that keeps a live decoder + demuxer cache open, which is what mpv is.
 
 **Phase 0 spike (done 2026-08-25):** see `PHASES.md`. Confirmed mpv can render into a native Win32 child window embedded inside an app window, with correct resize behavior, using **runtime-loaded libmpv** (`LoadLibraryW`/`GetProcAddress`, not link-time linking — no MSVC import lib exists for the available `libmpv-2.dll`). `src/bin/mpv_spike.rs` has the proof.
 
-Remaining risk carried into Phase 1: the spike used a hand-rolled Win32 window standing in for the app window. Still need to confirm mpv's child window coexists cleanly with eframe/glutin's actual GL surface and repaint loop (get the real window's HWND via `raw-window-handle` instead of creating our own).
+**Phase 1 (done 2026-09-19, pending runtime verification):** `player.rs` resolves the real eframe window's HWND via `raw-window-handle`'s `frame.window_handle()` (the risk carried over from Phase 0 — the spike used a hand-rolled stand-in window) and embeds mpv's child window into it. Whether it actually coexists cleanly with eframe/glutin's GL surface/repaint loop at runtime is still unconfirmed — only `cargo check` has passed so far.
 
-**Open question:** how to distribute `libmpv-2.dll` with the real app (bundle it, require a local mpv/libmpv install, or a configurable path). Not decided — revisit before Phase 1 is considered done.
+**Open question:** how to distribute `libmpv-2.dll` with the real app (bundle it, require a local mpv/libmpv install, or a configurable path). Still not decided — `player.rs`'s `dll_path()` currently falls back to the external reference project's copy (`C:\cli_tools\scripts\py\cutv\libmpv-2.dll`), overridable via `CUTV_LIBMPV_PATH`. Revisit before shipping.
 
 Consequence for crop UI: mpv paints directly into its own native child window, so egui can't draw a crop rubber-band *on top of* the video texture (there is no texture anymore). Needs a separate topmost native overlay window positioned over mpv's child window (mirrors the Python reference's color-keyed Tk `Toplevel`, or on Windows a layered window with `SetLayeredWindowAttributes` for real per-pixel alpha instead of color-keying).
 
@@ -34,11 +33,9 @@ Consequence for crop UI: mpv paints directly into its own native child window, s
 
 - yt-dlp URL download support — lowest priority, separate concern (download + cache dir), not part of this phase.
 
-## Module plan post-migration
+## Module plan for remaining phases
 
-- `player.rs` (new) — `Player::new(path)`, `play()`, `pause()`, `seek(t)`, `step_frames(n)`, `set_mute(bool)`; property-observer callbacks pushed into a channel drained each `update()` tick (same pattern as the current decoder/seek channels, one source instead of two).
 - `probe.rs` — add `nvenc_available() -> bool` (cached), extend `encode_args` with the NVENC branch.
-- `app.rs` — `do_cut` gains `-hwaccel cuda` + crop `-vf` injection + progress parsing; new `CROP`/`GIF` buttons in the edit row (existing `cbtn`/`tbtn` helpers).
+- `app.rs` — `do_cut` gains `-hwaccel cuda` + crop `-vf` injection + progress parsing; new `CROP`/`GIF` buttons already stubbed in the edit row (existing `cbtn`/`tbtn` helpers) — `toggle_crop_mode`/`do_gif` just need real implementations.
 - `crop.rs` (new) — crop state, canvas↔source coordinate mapping, overlay window.
 - `gif.rs` (new) — two-pass GIF export worker.
-- `video.rs`, `audio.rs` — removed once `player.rs` is proven.

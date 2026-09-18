@@ -14,12 +14,13 @@ Goal: prove mpv can render into a child window inside the eframe window before c
 - **Result:** spike succeeded — proceeding to Phase 1. `src/bin/mpv_spike.rs` stays in the tree as a reference/regression check for the embedding technique; not part of the shipped app (not wired into `main.rs`).
 - **Open question carried to Phase 1:** how to distribute `libmpv-2.dll` with the real app (bundle vs. require a local mpv/libmpv install vs. read a configurable path) — not decided yet, spike currently points at the external reference project's copy.
 
-## Phase 1 — player.rs migration (depends on Phase 0)
+## Phase 1 — player.rs migration (depends on Phase 0) (DONE 2026-09-19, pending runtime verification)
 
-- [ ] Write `player.rs`: `Player::new(path)`, `play()`, `pause()`, `seek(t)`, `step_frames(n)`, `set_mute(bool)`, property-observer channel for position/duration/pause state.
-- [ ] Wire `app.rs` to `player.rs` instead of `video.rs`/`audio.rs` (playback controls, timeline scrubbing, thumbnails — thumbnails can stay ffmpeg-based single-frame extraction, independent of the player).
-- [ ] Remove `video.rs`, `audio.rs`.
-- [ ] Update `FILE_INDEX.md`, `PLAN.md`.
+- [x] Write `player.rs`: `Player::new(parent_hwnd, rect, path)`, `play()`, `pause()`, `seek(t)`, `step_frames(n)`, `set_mute(bool)`, `set_rect(...)`, `poll()` (polls `time-pos`/`duration`/`pause` each frame rather than an observer channel — simpler given egui's own per-frame `update()` tick already drives polling).
+- [x] Wire `app.rs` to `player.rs` instead of `video.rs`/`audio.rs` — playback controls, timeline scrubbing all go through `Player`; thumbnails extracted to `thumbs.rs` (ffmpeg single-frame extraction, independent of the player). Real app window HWND resolved via `raw-window-handle`'s `frame.window_handle()` (the Phase 0 open item — spike used a hand-rolled stand-in window).
+- [x] Remove `video.rs`, `audio.rs`.
+- [x] Update `FILE_INDEX.md`, `PLAN.md`.
+- [ ] **Not yet verified**: actually running the app against a real video to confirm mpv's embedded child window coexists cleanly with eframe/glutin's GL surface/repaint loop and that playback/seek/mute work end-to-end. Only `cargo check` has passed so far.
 
 ## Phase 2 — cut progress bar
 
