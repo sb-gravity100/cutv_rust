@@ -1,0 +1,7 @@
+# Points ffmpeg-sys-next (via the `vcpkg` crate) at the FFmpeg build vcpkg
+# installed with NVENC/NVDEC/CUVID/D3D11VA support:
+#   C:\vcpkg\bootstrap-vcpkg.bat
+#   C:\vcpkg\vcpkg.exe install "ffmpeg[nvcodec,avcodec,avformat,avfilter,swscale,swresample]:x64-windows"
+# Also needs LLVM/clang on the machine for bindgen (https://github.com/llvm/llvm-project/releases).
+[env]
+VCPKG_ROOT = "C:/vcpkg"
