@@ -2,6 +2,10 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `cedc5b7` · 2026-09-19 · tune: restore gifski quality to 90, keep 20fps
+- `src/gif.rs`
+- `PLAN.md`
+
 ### `6b74539` · 2026-09-19 · tune: bump GIF export to 20fps, lower gifski quality to 35
 - `src/gif.rs`
 - `PLAN.md`
