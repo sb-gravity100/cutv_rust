@@ -4,27 +4,32 @@ File system index with tags and one-line descriptions. Update whenever files are
 
 ## Root
 
-- `Cargo.toml` — `[build]` crate manifest, dependencies (eframe/egui, rodio, chrono, anyhow, log, env_logger, serde_json, ffmpeg-next).
+- `Cargo.toml` — `[build]` crate manifest, dependencies (eframe/egui, gstreamer/gstreamer-app/gstreamer-video, chrono, anyhow, log, env_logger, serde_json).
 - `Cargo.lock` — `[build]` pinned dependency versions.
-- `.cargo/config.toml` — `[build]` sets `VCPKG_ROOT` so `ffmpeg-sys-next`'s build script finds vcpkg's FFmpeg automatically. See `PLAN.md` for the vcpkg/LLVM setup this depends on.
+- `.cargo/config.toml` — `[build]` sets `PKG_CONFIG_PATH`/`PKG_CONFIG` so `gstreamer-rs`'s sys crates find vcpkg's GStreamer automatically. See `PLAN.md` for the vcpkg setup this depends on (and the `GST_PLUGIN_PATH`/`PATH` runtime env vars, set separately as persistent user env vars, not via this file).
 - `CLAUDE.md` — `[docs]` session rules + project architecture guidance for Claude Code.
 - `.gitignore` — `[build]` ignores `/target`.
 
 ## `src/`
 
 - `main.rs` — `[entry]` resolves target video path, probes it, sizes the window, launches `eframe` with `app::CutvApp`.
-- `app.rs` — `[ui][state]` `CutvApp` (`eframe::App` impl) — owns all playback/UI state, egui drawing (video frame, timeline, transport, edit row, status bar), keyboard shortcuts, `do_cut()` export. Lazily creates `Player` once the real window HWND is resolvable via `raw-window-handle`.
-- `player.rs` — `[playback]` **being replaced** — currently `Player` embeds libmpv into a native Win32 child window (runtime-loaded via `LoadLibraryW`/`GetProcAddress`, no MSVC import lib for the available DLL). Superseded 2026-09-19 (see `PLAN.md`'s "Architecture decision") — being rewritten as a persistent in-process decoder via `ffmpeg-next` instead, to drop mpv's async-command bug class. See `PHASES.md` Phase 1b.
+- `app.rs` — `[ui][state]` `CutvApp` (`eframe::App` impl) — owns all playback/UI state, egui drawing (video frame, timeline, transport, edit row, status bar, FPS counter), keyboard shortcuts, `do_cut()` export. Constructs `Player` directly (no native window handle needed — frames render as an egui texture).
+- `player.rs` — `[playback]` `Player` — wraps a GStreamer `playbin` pipeline (`play`/`pause`/`seek`/`seek_fast`/`step_frames`/`set_mute`/`poll`). Video frames pulled from an `appsink` (via a GPU `d3d11upload!d3d11convert!...` colorspace-conversion bin, falling back to CPU `videoconvert`) as raw RGB for the caller to upload as a texture. Audio is playbin's own default sink — no separate audio code. Has detailed `trace!`/`debug!` timing instrumentation (see PLAN.md's "low-FPS investigation") — `RUST_LOG=trace` for per-frame numbers.
 - `thumbs.rs` — `[playback][thumbnails]` `spawn_thumbs` — background-thread ffmpeg single-frame grabs for the timeline thumbnail strip (N=24), independent of `Player`.
 - `probe.rs` — `[ffmpeg][metadata]` `probe_video` (ffprobe → duration/fps/width/height), `encode_args` (source-codec-aware ffmpeg encoder args for the final cut, CPU only today).
 - `util.rs` — `[helpers]` `fmt_tc` (timecode formatting), `parse_fps` (ffprobe `"num/den"` parser).
 
-- `bin/mpv_spike.rs` — `[spike][reference]` Phase 0 proof that libmpv can render into a native Win32 child window embedded in an app window. Not wired into `main.rs`; run directly via `cargo run --bin mpv_spike -- <libmpv-2.dll path> <video path>`. Kept as a reference for the runtime-loading technique `player.rs` uses.
+- `bin/mpv_spike.rs` — `[spike][reference, no longer the playback direction]` Phase 0 proof that libmpv can render into a native Win32 child window embedded in an app window. Not wired into `main.rs`. Kept only as a reference for the win32-embedding/runtime-DLL-loading technique, in case it's ever needed again — playback is GStreamer now, not mpv.
 
 ## Planned / not yet created
 
-- `crop.rs` — `[feature]` crop rubber-band state + coordinate mapping + overlay window.
+- `crop.rs` — `[feature]` crop rubber-band state + coordinate mapping; draws directly over the video texture in egui (no overlay window needed — see PLAN.md).
 - `gif.rs` — `[feature]` two-pass GIF export (palette generation + paletteuse).
+
+## Removed (architecture history — see PLAN.md's "Architecture decision")
+
+- `video.rs`, `audio.rs` (ffmpeg-pipe era) — removed when the mpv migration landed.
+- `video.rs`, `audio.rs` (ffmpeg-next decoder era, different content, same filenames) — removed when the GStreamer migration landed 2026-09-19.
 
 ## External reference (not part of this repo/build)
 

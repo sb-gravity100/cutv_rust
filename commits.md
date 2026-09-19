@@ -2,6 +2,13 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `9f98014` · 2026-09-19 · feat: switch playback from hand-rolled ffmpeg-next decoder to GStreamer playbin
+- `.cargo/config.toml`
+- `Cargo.lock`
+- `Cargo.toml`
+- `src/app.rs`
+- `src/player.rs`
+
 ### `09c5ea1` · 2026-09-19 · build: add ffmpeg-next dependency and vcpkg FFmpeg toolchain
 - `Cargo.lock`
 - `Cargo.toml`

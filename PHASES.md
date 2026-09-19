@@ -33,17 +33,20 @@ Completed and runtime-verified, but the libmpv approach itself was dropped after
 
 Verified via debug logging (`step_frames n=... pos=...` / `frame hold: skip repeat, still seeking`, both now permanent `debug!` logs) rather than screenshots for the last two fixes — direction and cadence are correct in both directions near the start of the file, and the seeking-gate correctly suppresses a repeat mid-seek instead of queuing. Not yet re-verified visually/interactively after these four fixes (automated window-focus scripting hit Windows' `SetForegroundWindow` focus-stealing restriction mid-session) — worth a manual pass.
 
-## Phase 1b — drop libmpv for a Rust-native persistent decoder (depends on Phase 1)
+## Phase 1b — drop libmpv for a Rust-native persistent decoder (SUPERSEDED 2026-09-19, same day — see Phase 1c)
 
-Goal: replace `player.rs`'s libmpv embedding with an in-process decoder via `ffmpeg-next`, keeping the demuxer/decoder warm across seeks (same scrub-smoothness win mpv gave us) but without mpv's async fire-and-forget command model, which was the root cause of every bug found in Phase 1 (see above). See `PLAN.md`'s "Architecture decision" section for full rationale.
+Goal was a hand-rolled `ffmpeg-next` decode thread. Built and largely worked (correct direction/cadence for frame stepping, a real precise-seek-via-keyframe implementation, backlog-avoidance gating) but after real regressions (black screen on load, an under-thought resolution cap, a hard freeze on seek once NVDEC was wired in via raw FFI) the call was made to stop reimplementing a video player by hand and use a mature pipeline library instead — see `PLAN.md`'s "Architecture decision" for the full reasoning. `ffmpeg-next` was removed as a dependency.
 
-- [x] Confirm build toolchain: vcpkg-built FFmpeg with NVENC/NVDEC/CUVID/D3D11VA/DXVA2 (`vcpkg install "ffmpeg[nvcodec,avcodec,avformat,avfilter,swscale,swresample]:x64-windows"`, ~12 min build), LLVM/clang for `bindgen`, `.cargo/config.toml` pointing `VCPKG_ROOT` at vcpkg. `cargo add ffmpeg-next` + `cargo build` confirmed working 2026-09-19.
-- [ ] Write the new `player.rs` (or rename to `decoder.rs`): persistent background thread opens the file once via `ffmpeg-next`, decodes frames to RGB for an egui texture (replacing the native child window), handles play/pause/seek/step synchronously within that thread (no async command queue to guess completion of).
-- [ ] Audio: decide whether to keep `rodio` for playback (decoding audio ourselves via `ffmpeg-next` too, feeding a custom `rodio::Source`) or find another path — needs to stay in sync with video via a shared clock/position, same problem the pre-mpv `audio.rs` had to solve manually.
-- [ ] Hardware decode: use `ffmpeg-next`'s hardware device context APIs (NVDEC/D3D11VA, now built into the linked FFmpeg) so decode isn't CPU-bound.
-- [ ] Wire `app.rs`'s `ui_video` back to drawing a texture (like pre-mpv `video.rs`) instead of positioning a native child window; `Player`'s public API (`play`/`pause`/`seek`/`step_frames`/`set_mute`/`poll`) should carry over mostly unchanged so the rest of `app.rs` needs minimal changes.
-- [ ] Remove the libmpv code from `player.rs` (or delete it if renamed to `decoder.rs`) once the new decoder is proven; `src/bin/mpv_spike.rs` can stay as a reference for the win32-embedding technique even though it's no longer the playback direction.
-- [ ] Update `FILE_INDEX.md`, `PLAN.md`, `commits.md`.
+## Phase 1c — GStreamer `playbin` (depends on Phase 1b) (DONE 2026-09-19)
+
+- [x] Build toolchain: vcpkg GStreamer (`vcpkg install "gstreamer[plugins-base,plugins-good,plugins-bad,libav]:x64-windows"`, ~5 min — the `nvcodec` feature fails to build, a vcpkg port bug, not included), `.cargo/config.toml` pointing `PKG_CONFIG_PATH`/`PKG_CONFIG` at it. `GST_PLUGIN_PATH` + vcpkg `bin` on `PATH` set as persistent user env vars for runtime DLL/plugin discovery.
+- [x] Rewrote `player.rs`: `Player` wraps a `playbin` pipeline + `appsink` (via a GPU `d3d11upload!d3d11convert!...!d3d11download` colorspace-conversion bin — see below for why not plain `videoconvert`). Same public API shape as before (`play`/`pause`/`seek`/`seek_fast`/`step_frames`/`set_mute`/`poll`), so `app.rs` needed minimal changes. Audio is playbin's own default sink — `audio.rs` deleted, no replacement needed.
+- [x] `seek`/`seek_fast` split: `seek` uses `SeekFlags::ACCURATE` (frame-exact, for IN/OUT/stepping), `seek_fast` uses `SeekFlags::KEY_UNIT` (keyframe-snap, cheap) for continuous timeline-drag scrubbing, landing on an exact `seek()` once the drag settles (`app.rs`'s `ui_timeline`).
+- [x] Removed `video.rs`/`audio.rs` (the `ffmpeg-next` versions) entirely; `mod video`/`mod audio` dropped from `main.rs`.
+- [x] **The low-FPS investigation** (~9fps → 30fps): see `PLAN.md`'s dedicated section. Two real, separate fixes: (1) swap CPU `videoconvert` for GPU `d3d11convert` (this vcpkg build has ORC disabled, making `videoconvert` ~74x slower than it should be), and (2) **use `cargo build --release`** — the debug build's unoptimized `ColorImage::from_rgb` alone cost ~96ms/frame, capping playback at ~9fps regardless of how fast the pipeline was.
+- [x] Detailed `trace!`/`debug!` timing instrumentation left in `player.rs`/`app.rs` (gated behind `RUST_LOG=trace` for per-frame numbers, `RUST_LOG=debug` for sparse events like `measured_fps`) — reusable if a future perf regression needs the same kind of investigation.
+- [x] Update `FILE_INDEX.md`, `PLAN.md`, `CLAUDE.md`, `commits.md`.
+- [ ] Not yet re-verified end-to-end by the user after the D3D11 + release-build fixes landed together (verified via `measured_fps=30.0` in logs and the isolated `gst-launch` throughput tests, not a fresh interactive pass) — worth a final manual check of playback/seeking/stepping/mute/exit feel.
 
 ## Phase 2 — cut progress bar
 
@@ -52,8 +55,7 @@ Goal: replace `player.rs`'s libmpv embedding with an in-process decoder via `ffm
 
 ## Phase 3 — crop tool
 
-- [ ] Native topmost overlay window positioned over the video region (layered window w/ per-pixel alpha).
-- [ ] Right-drag rubber-band → crop rect in canvas coords → map to source-pixel coords.
+- [ ] Right-drag rubber-band drawn directly over the video texture in egui (no native overlay window needed — GStreamer's frames render as an egui texture, not a native child window) → crop rect in canvas coords → map to source-pixel coords.
 - [ ] `CROP` toggle button in the edit row.
 - [ ] Bake `-vf crop=...` into `do_cut` (and GIF export once Phase 4 lands) when a crop is set.
 
@@ -64,7 +66,7 @@ Goal: replace `player.rs`'s libmpv embedding with an in-process decoder via `ffm
 
 ## Phase 5 — NVENC/GPU encode
 
-Note: `do_cut`'s final export still shells out to `ffmpeg.exe`/`ffprobe.exe` on `PATH` (unrelated to the vcpkg-built FFmpeg linked into the app for playback decode in Phase 1b) — this phase is about the `PATH` ffmpeg's NVENC support, not the linked library.
+Note: `do_cut`'s final export shells out to `ffmpeg.exe`/`ffprobe.exe` on `PATH` — entirely separate from GStreamer (used only for playback decode). This phase is about the `PATH` ffmpeg's NVENC support.
 
 - [ ] `probe::nvenc_available()` (cached, greps `ffmpeg -hide_banner -encoders`).
 - [ ] Extend `probe::encode_args` with GPU branch (`h264_nvenc`/`hevc_nvenc`) + `-hwaccel cuda` on the input side, falling back to CPU encoders when unavailable.
