@@ -244,9 +244,16 @@ impl CutvApp {
         let p      = Path::new(&self.path);
         let stem   = p.file_stem().unwrap_or_default().to_string_lossy();
         let ext    = p.extension().unwrap_or_default().to_string_lossy();
-        let dir    = p.parent().unwrap_or(Path::new(".")).to_string_lossy();
         let ts_str = Local::now().format("%Y%m%d-%H%M%S").to_string();
-        let out_path = format!("{dir}/{stem}_cut_{ts_str}.{ext}");
+        // p.parent() is Some("") — not None — for a bare relative filename
+        // like "sample.mp4" (no directory component), so a plain
+        // `unwrap_or(".")` never kicks in and building the path by string
+        // formatting produced a leading "/" (filesystem root) instead of
+        // the source's actual directory. `.join()` on a real PathBuf
+        // handles this correctly either way.
+        let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let out_path = dir.join(format!("{stem}_cut_{ts_str}.{ext}"))
+            .to_string_lossy().to_string();
 
         debug!("cut  [{:.3} → {:.3}]  -> {out_path}", self.in_t, self.out_t);
         self.status = format!("Cutting → {}", Path::new(&out_path).file_name()
