@@ -2,6 +2,13 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `396745b` · 2026-09-19 · feat: content-hash proxy naming + exit-time proxy cleanup
+- `src/proxy.rs`
+- `src/app.rs`
+- `FILE_INDEX.md`
+- `PLAN.md`
+- `PHASES.md`
+
 ### `b770f59` · 2026-09-19 · docs: record context-menu fix (per-extension) and console-suppression fix
 - `FILE_INDEX.md`
 - `PHASES.md`
