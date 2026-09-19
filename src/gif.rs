@@ -20,7 +20,11 @@ use log::{debug, warn};
 use crate::crop::CropRect;
 
 const GIF_WIDTH: u32 = 640;
-const GIF_FPS: f64 = 10.0;
+const GIF_FPS: f64 = 20.0;
+// gifski's `quality` (1-100): lower = lossier/smaller, higher = closer to
+// source. 35 trades noticeably more compression for visible quantization/
+// dithering artifacts, in exchange for much smaller files at 20fps.
+const GIF_QUALITY: u8 = 35;
 
 pub enum GifOutcome {
     Done(String),
@@ -121,7 +125,7 @@ pub fn spawn_gif_export(
             // the exact dimensions we're about to feed it.
             width: Some(gif_w),
             height: Some(gif_h),
-            quality: 90,
+            quality: GIF_QUALITY,
             fast: false,
             repeat: Repeat::Infinite,
         };
