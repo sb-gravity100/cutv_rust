@@ -19,7 +19,7 @@ use log::{debug, warn};
 
 use crate::crop::CropRect;
 
-const GIF_WIDTH: u32 = 640;
+const GIF_WIDTH: u32 = 800;
 const GIF_FPS: f64 = 20.0;
 // gifski's `quality` (1-100): lower = lossier/smaller, higher = closer to
 // source.
