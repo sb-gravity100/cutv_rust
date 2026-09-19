@@ -111,6 +111,15 @@ Note: `do_cut`'s final export shells out to `ffmpeg.exe`/`ffprobe.exe` on `PATH`
 - [x] `cargo build --release` and `cargo clippy --release` both clean; app launched and verified (both via `cargo run --release` and via the repointed `cutv.bat`) to load `sample.mp4` correctly with the new icon/button in place.
 - [x] Update `FILE_INDEX.md`, `PLAN.md`.
 
+## Phase 7 — scrub proxy: content-hash caching + exit-time cleanup (DONE 2026-09-19)
+
+- [x] `proxy.rs`: `video_cache_key()` hashes file length + up to 1MiB sampled from each end (bounded I/O, not a full-file hash) to name proxies `cutv_proxy_<key>.mp4` instead of `cutv_proxy_<pid>.mp4` — same video content reuses an existing proxy regardless of filename/path, including one left by a crashed previous session.
+- [x] `spawn_proxy()` checks for an existing proxy file before transcoding (cache hit → reused instantly, no ffmpeg run at all); transcodes to a `.mp4.tmp` sibling and `rename()`s into place only on success, so an interrupted transcode never leaves a corrupt file mistaken for a valid cache entry. Needed an explicit `-f mp4` on the ffmpeg command — the `.tmp` extension broke ffmpeg's container-format auto-detection (found and fixed during manual verification below).
+- [x] `load_video()` no longer deletes the outgoing video's proxy on switch — left on disk for reuse. `cleanup_all_proxies()` (new) sweeps every `cutv_proxy_*` file in the temp dir; wired into `CutvApp`'s `Drop`, replacing the old single-file removal there.
+- [x] Manually verified end-to-end: transcoded a fresh proxy for `sample.mp4`, `taskkill`'d the process (simulating a crash — skips `Drop`) and confirmed the proxy file survived; relaunched against the same file and confirmed an instant cache hit (`reusing cached proxy for ...`, no transcode) instead of a re-transcode.
+- [x] `cargo build --release` and `cargo clippy --release` clean (no new lints in `proxy.rs`).
+- [x] Update `FILE_INDEX.md`, `PLAN.md`.
+
 ## Deferred (not scheduled)
 
 - yt-dlp URL download support.

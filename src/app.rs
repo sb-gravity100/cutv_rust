@@ -68,8 +68,10 @@ pub struct CutvApp {
     // Scrub proxy (short-GOP transcode, see proxy.rs): `player` plays the
     // original file until this resolves, then gets swapped to point at the
     // proxy for fast accurate seeking. `proxy_active` guards against
-    // re-swapping every frame once it has; the temp file gets deleted on
-    // drop.
+    // re-swapping every frame once it has. Proxy temp files are named by
+    // content hash and deliberately left on disk when switching videos (so
+    // switching back reuses them) — all `cutv_proxy_*` temp files get swept
+    // on app exit instead, see `proxy::cleanup_all_proxies`.
     pending_proxy: Arc<Mutex<Option<PathBuf>>>,
     proxy_active: Option<PathBuf>,
 
@@ -249,19 +251,16 @@ impl CutvApp {
 
     /// Swaps the app over to a newly opened video in place — same
     /// initialization `new()` does, minus re-creating `ctx`/window. The old
-    /// `Player`/scrub proxy are torn down (assigning over `self.player`
-    /// drops the old GStreamer pipeline; the old proxy temp file is removed
-    /// explicitly since only the *current* `proxy_active` gets cleaned up
-    /// automatically, on final app `Drop`).
+    /// `Player` is torn down (assigning over `self.player` drops the old
+    /// GStreamer pipeline); the old proxy temp file is left on disk
+    /// (content-hash named — reused as-is if this video gets reopened
+    /// later this session) rather than deleted here. All proxy temp files
+    /// are swept together on app exit, see `proxy::cleanup_all_proxies`.
     fn load_video(&mut self, path: String, info: crate::probe::VideoInfo) {
         debug!("open: {path}  {}x{}  fps={:.3}  dur={:.3}s",
             info.width, info.height, info.fps, info.duration);
 
-        if let Some(p) = self.proxy_active.take() {
-            if let Err(e) = std::fs::remove_file(&p) {
-                debug!("failed to remove previous scrub proxy temp file {p:?}: {e}");
-            }
-        }
+        self.proxy_active = None;
 
         self.pending_thumbs = spawn_thumbs(path.clone(), info.duration, self.ctx.clone());
         self.player = Player::new(&path, info.duration, info.fps);
@@ -670,11 +669,7 @@ impl eframe::App for CutvApp {
 
 impl Drop for CutvApp {
     fn drop(&mut self) {
-        if let Some(p) = &self.proxy_active {
-            if let Err(e) = std::fs::remove_file(p) {
-                debug!("failed to remove scrub proxy temp file {p:?}: {e}");
-            }
-        }
+        crate::proxy::cleanup_all_proxies();
     }
 }
 

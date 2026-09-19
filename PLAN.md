@@ -65,6 +65,13 @@ Two more bugs found and fixed in the same pass, both root-caused by testing agai
 
 Proxy transcode time is proportional to source length/resolution (measured: ~10s for a 1.5min 1080p60 source, ~29s for a ~5min 2340x1080 source, both via NVENC) — noticeable but not blocking, since playback works on the original file the whole time.
 
+## Proxy caching and cleanup (2026-09-19)
+
+Two follow-on fixes to the scrub proxy (`proxy.rs`), motivated by this being a crash-prone dev machine (see `CLAUDE.md`'s "Session saves" rule) and by re-opening the same video across sessions being a common workflow:
+
+- **Content-hash naming for reuse.** Proxies were originally named `cutv_proxy_<pid>.mp4` — unique per process, so every launch re-transcoded even for a video just played a minute ago. Renamed to `cutv_proxy_<video_cache_key>.mp4`, where `video_cache_key` hashes the file's length plus up to 1MiB sampled from each end (not a full-file hash — bounded I/O regardless of source size, since this only needs to be a good-enough cache key, not cryptographic). `spawn_proxy` checks for an existing file at that path before transcoding and reuses it as-is if found — same content under a different filename/path also hits the cache. Transcodes write to a `.mp4.tmp` sibling and `rename()` into place only on success, so a half-written proxy from an interrupted/crashed transcode is never mistaken for a complete one on a later run (an explicit `-f mp4` is needed on the ffmpeg command since the `.tmp` extension defeats ffmpeg's own container-format guessing).
+- **Exit-time sweep instead of per-switch deletion.** `load_video()` no longer deletes the previous video's proxy when switching to a new one — it's left on disk so switching back to it later (same session, or a future launch, or after a crash) hits the cache above. Instead, `proxy::cleanup_all_proxies()` scans the system temp dir for every `cutv_proxy_*` file (this session's and any leftover from earlier/crashed ones) and deletes them, called once from `CutvApp`'s `Drop` on normal app exit. A crash skips `Drop` same as always — its proxy stays behind, gets reused if the same video is reopened, and is eventually swept by the next clean exit.
+
 ## Features to add (all approved, in priority order)
 
 1. ~~**Cut progress bar**~~ — done, see `PHASES.md` Phase 2.
