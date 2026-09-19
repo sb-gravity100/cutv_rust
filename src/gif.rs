@@ -22,9 +22,8 @@ use crate::crop::CropRect;
 const GIF_WIDTH: u32 = 640;
 const GIF_FPS: f64 = 20.0;
 // gifski's `quality` (1-100): lower = lossier/smaller, higher = closer to
-// source. 35 trades noticeably more compression for visible quantization/
-// dithering artifacts, in exchange for much smaller files at 20fps.
-const GIF_QUALITY: u8 = 35;
+// source.
+const GIF_QUALITY: u8 = 90;
 
 pub enum GifOutcome {
     Done(String),
