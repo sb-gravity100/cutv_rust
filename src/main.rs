@@ -1,3 +1,11 @@
+// GUI subsystem: no console window on a standalone launch (double-click,
+// context-menu "Cut with CUTV", drag-a-file-onto-the-exe). Only affects
+// launches with no existing console to attach to — running via `cargo run`
+// or `cutv.bat` from an already-open terminal still inherits that
+// terminal's stdout/stderr, so `debug!`/`RUST_LOG` logging is unaffected
+// there (and still works redirected to a file either way).
+#![windows_subsystem = "windows"]
+
 mod app;
 mod crop;
 mod gif;
