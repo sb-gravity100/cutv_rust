@@ -74,38 +74,64 @@ pub fn nvenc_available() -> bool {
     })
 }
 
-// NVENC's rate-control knobs for a visually-lossless-ish, still-fast cut
-// export: VBR with a low constant-quality target, spatial/temporal AQ for
-// detail retention, and a modest lookahead — mirrors the external Python
-// reference's `_NVENC_OPTS` so exports from both tools look the same.
-const NVENC_OPTS: &[&str] = &[
-    "-preset", "p6", "-tune", "hq", "-rc", "vbr",
-    "-cq", "18", "-b:v", "0",
-    "-spatial_aq", "1", "-temporal_aq", "1",
-    "-aq-strength", "8", "-rc-lookahead", "32",
-];
+/// Source video stream's bitrate in kbps, for matching the cut's output
+/// bitrate to it. Falls back to the container's overall bitrate (slightly
+/// over-estimates video-only bitrate since it includes audio, but only
+/// used when the stream itself has no `bit_rate` tag — common for MKV).
+fn source_video_bitrate_kbps(info: &Value, vstream: &Value) -> Option<u64> {
+    vstream["bit_rate"].as_str()
+        .and_then(|b| b.parse::<u64>().ok())
+        .or_else(|| info["format"]["bit_rate"].as_str().and_then(|b| b.parse::<u64>().ok()))
+        .map(|b| (b / 1000).max(100))
+}
+
+/// `-b:v`/`-maxrate`/`-bufsize` targeting the given bitrate (maxrate at
+/// 1.5x, bufsize at 2x, room for encoder-side VBR fluctuation around the
+/// target without ballooning file size). `None` falls back to `-b:v 0`,
+/// i.e. unconstrained — quality-only rate control (CRF/CQ), used when the
+/// source bitrate couldn't be determined.
+fn bitrate_args(br_kbps: Option<u64>) -> Vec<String> {
+    match br_kbps {
+        Some(br) => vec![
+            "-b:v".into(), format!("{br}k"),
+            "-maxrate".into(), format!("{}k", br * 3 / 2),
+            "-bufsize".into(), format!("{}k", br * 2),
+        ],
+        None => vec!["-b:v".into(), "0".into()],
+    }
+}
+
+fn nvenc_extra(br_kbps: Option<u64>, profile: &str) -> Vec<String> {
+    ["-preset", "p6", "-tune", "hq", "-rc", "vbr", "-cq", "18"]
+        .into_iter().map(String::from)
+        .chain(bitrate_args(br_kbps))
+        .chain(["-spatial_aq", "1", "-temporal_aq", "1", "-aq-strength", "8", "-rc-lookahead", "32"]
+            .into_iter().map(String::from))
+        .chain(["-profile:v".to_string(), profile.to_string()])
+        .collect()
+}
+
+/// CPU h264/hevc: bitrate-targeted (ABR + VBV) when the source bitrate is
+/// known, so the cut lands close to it; CRF-only quality mode otherwise
+/// (`-b:v 0` doesn't mean anything to libx264/libx265 the way it does to
+/// NVENC's CQ mode, so this needs its own fallback rather than reusing
+/// `bitrate_args`' `None` case).
+fn cpu_h26x_extra(br_kbps: Option<u64>) -> Vec<String> {
+    let mut v = vec!["-preset".to_string(), "slow".to_string()];
+    match br_kbps {
+        Some(br) => v.extend(bitrate_args(Some(br))),
+        None => v.extend(["-crf".to_string(), "18".to_string()]),
+    }
+    v
+}
 
 pub fn encode_args(path: &str) -> Vec<String> {
     let info = ffprobe(path);
     let mut v: Vec<String> = vec![];
     let mut a: Vec<String> = vec![];
 
-    let nvenc_v_map: &[(&str, &str, &[&str])] = &[
-        ("h264", "h264_nvenc", NVENC_OPTS),
-        ("hevc", "hevc_nvenc", NVENC_OPTS),
-    ];
-    let cpu_v_map: &[(&str, &str, &[&str])] = &[
-        ("h264",       "libx264",    &["-crf","18","-preset","slow"]),
-        ("hevc",       "libx265",    &["-crf","18","-preset","slow"]),
-        ("vp9",        "libvpx-vp9", &["-crf","33","-b:v","0"]),
-        ("vp8",        "libvpx",     &["-crf","10","-b:v","0"]),
-        ("av1",        "libaom-av1", &["-crf","30","-b:v","0"]),
-        ("mpeg4",      "mpeg4",      &["-qscale:v","3"]),
-        ("mpeg2video", "mpeg2video", &["-qscale:v","3"]),
-        ("prores",     "prores_ks",  &["-profile:v","3"]),
-    ];
-    // NVENC only covers h264/hevc; everything else still falls through to
-    // the CPU map even when NVENC is available (same as the reference).
+    // NVENC only covers h264/hevc; everything else falls through to a CPU
+    // encoder even when NVENC is available (same as the external reference).
     let use_nvenc = nvenc_available();
     let lossless = ["flac","pcm_s16le","pcm_s24le","pcm_s32le","pcm_f32le","alac"];
     let a_map: &[(&str, &str)] = &[
@@ -121,16 +147,26 @@ pub fn encode_args(path: &str) -> Vec<String> {
 
             if ct == "video" && v.is_empty() {
                 let pfmt = s["pix_fmt"].as_str().unwrap_or("yuv420p");
-                let (enc, extra) = (if use_nvenc { nvenc_v_map } else { &[] as &[_] }).iter()
-                    .chain(cpu_v_map.iter())
-                    .find(|(k,_,_)| *k == cn)
-                    .map(|(_,e,x)| (*e, *x))
-                    .unwrap_or(("libx264", &["-crf","18","-preset","slow"] as &[&str]));
-                v = ["-c:v", enc].iter().copied()
-                    .chain(extra.iter().copied())
-                    .chain(["-pix_fmt", pfmt])
-                    .map(String::from).collect();
-                debug!("v_enc={enc}  pix_fmt={pfmt}  nvenc={use_nvenc}");
+                let br = source_video_bitrate_kbps(&info, s);
+                let (enc, extra): (&str, Vec<String>) = match cn {
+                    "h264" if use_nvenc => ("h264_nvenc", nvenc_extra(br, "high")),
+                    "hevc" if use_nvenc => ("hevc_nvenc", nvenc_extra(br, "main")),
+                    "h264" => ("libx264", cpu_h26x_extra(br)),
+                    "hevc" => ("libx265", cpu_h26x_extra(br)),
+                    "vp9"  => ("libvpx-vp9", ["-crf","33"].into_iter().map(String::from).chain(bitrate_args(br)).collect()),
+                    "vp8"  => ("libvpx",     ["-crf","10"].into_iter().map(String::from).chain(bitrate_args(br)).collect()),
+                    "av1"  => ("libaom-av1", ["-crf","30"].into_iter().map(String::from).chain(bitrate_args(br)).collect()),
+                    "mpeg4"      => ("mpeg4",      vec!["-qscale:v".to_string(), "3".to_string()]),
+                    "mpeg2video" => ("mpeg2video", vec!["-qscale:v".to_string(), "3".to_string()]),
+                    "prores"     => ("prores_ks",  vec!["-profile:v".to_string(), "3".to_string()]),
+                    _ if use_nvenc => ("h264_nvenc", nvenc_extra(br, "high")),
+                    _ => ("libx264", cpu_h26x_extra(br)),
+                };
+                v = ["-c:v", enc].iter().copied().map(String::from)
+                    .chain(extra)
+                    .chain(["-pix_fmt".to_string(), pfmt.to_string()])
+                    .collect();
+                debug!("v_enc={enc}  pix_fmt={pfmt}  nvenc={use_nvenc}  src_bitrate={br:?}kbps");
             }
             if ct == "audio" && a.is_empty() {
                 let enc = a_map.iter().find(|(k,_)| *k == cn).map(|(_,v)| *v).unwrap_or("aac");
@@ -150,15 +186,17 @@ pub fn encode_args(path: &str) -> Vec<String> {
     }
 
     if v.is_empty() {
-        v = if use_nvenc {
-            ["-c:v", "h264_nvenc"].iter().copied()
-                .chain(NVENC_OPTS.iter().copied())
-                .chain(["-pix_fmt", "yuv420p"])
-                .map(String::from).collect()
+        // No video stream was found to read a source bitrate from, so this
+        // path always falls back to quality-only rate control.
+        let (enc, extra) = if use_nvenc {
+            ("h264_nvenc", nvenc_extra(None, "high"))
         } else {
-            ["-c:v","libx264","-crf","18","-preset","slow","-pix_fmt","yuv420p"]
-                .iter().map(|s| s.to_string()).collect()
+            ("libx264", cpu_h26x_extra(None))
         };
+        v = ["-c:v", enc].iter().copied().map(String::from)
+            .chain(extra)
+            .chain(["-pix_fmt".to_string(), "yuv420p".to_string()])
+            .collect();
     }
     if a.is_empty() {
         a = ["-c:a","aac","-b:a","192k"].iter().map(|s| s.to_string()).collect();
