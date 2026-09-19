@@ -2,6 +2,10 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `38e7238` · 2026-09-19 · fix: match do_cut export bitrate to source instead of pure CQ/CRF
+- `src/probe.rs`
+- `PHASES.md`
+
 ### `11d0c07` · 2026-09-19 · docs: sync planning docs for NVENC encode support (Phase 5)
 - `FILE_INDEX.md`
 - `PHASES.md`
