@@ -229,6 +229,74 @@ impl CutvApp {
         self.player.set_mute(self.muted);
     }
 
+    /// Native file-picker → `load_video`. Blocking (native modal dialog) —
+    /// fine here since the user is deliberately pausing to pick a file.
+    fn open_video(&mut self) {
+        let picked = rfd::FileDialog::new()
+            .set_title("Open video")
+            .add_filter("Video", &["mp4", "mov", "avi", "mkv", "webm"])
+            .pick_file();
+        let Some(path) = picked else { return };
+        let path = path.to_string_lossy().to_string();
+        match crate::probe::probe_video(&path) {
+            Ok(info) => self.load_video(path, info),
+            Err(e) => {
+                log::warn!("open failed: {e}");
+                self.status = format!("Open failed: {e}");
+            }
+        }
+    }
+
+    /// Swaps the app over to a newly opened video in place — same
+    /// initialization `new()` does, minus re-creating `ctx`/window. The old
+    /// `Player`/scrub proxy are torn down (assigning over `self.player`
+    /// drops the old GStreamer pipeline; the old proxy temp file is removed
+    /// explicitly since only the *current* `proxy_active` gets cleaned up
+    /// automatically, on final app `Drop`).
+    fn load_video(&mut self, path: String, info: crate::probe::VideoInfo) {
+        debug!("open: {path}  {}x{}  fps={:.3}  dur={:.3}s",
+            info.width, info.height, info.fps, info.duration);
+
+        if let Some(p) = self.proxy_active.take() {
+            if let Err(e) = std::fs::remove_file(&p) {
+                debug!("failed to remove previous scrub proxy temp file {p:?}: {e}");
+            }
+        }
+
+        self.pending_thumbs = spawn_thumbs(path.clone(), info.duration, self.ctx.clone());
+        self.player = Player::new(&path, info.duration, info.fps);
+        self.player.set_mute(self.muted);
+        self.pending_proxy = spawn_proxy(path.clone(), self.ctx.clone());
+
+        let filename = Path::new(&path).file_name().unwrap_or_default().to_string_lossy().to_string();
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("CUTV  —  {filename}")));
+
+        self.path = path;
+        self.duration = info.duration;
+        self.fps = info.fps;
+        self.src_w = info.width;
+        self.src_h = info.height;
+        self.video_tex = None;
+        self.frames_this_sec = 0;
+        self.fps_window_start = 0.0;
+        self.measured_fps = 0.0;
+        self.cur_t = 0.0;
+        self.in_t = 0.0;
+        self.out_t = info.duration;
+        self.thumb_texs.clear();
+        self.tl_drag = None;
+        self.crop_mode = false;
+        self.crop_rect = None;
+        self.crop_drag = None;
+        self.frame_hold_dir = 0;
+        self.next_hold_tick = 0.0;
+        self.status = "Space play  ←→ ±5s  ,. ±1f  I/O in/out  M mute  Enter cut  G gif".into();
+        self.cut_progress = 0.0;
+        *self.cut_progress_shared.lock().unwrap() = 0.0;
+        *self.cut_result.lock().unwrap() = None;
+        *self.gif_result.lock().unwrap() = None;
+    }
+
     fn toggle_crop_mode(&mut self) {
         self.crop_mode = !self.crop_mode;
         if self.crop_mode && self.crop_rect.is_none() {
@@ -542,6 +610,30 @@ impl eframe::App for CutvApp {
             (false, true) => 1,
             _ => 0,
         };
+
+        // ── Drag & drop: drop a video file anywhere on the window to open it ───
+        let hovering_file = !ctx.input(|i| i.raw.hovered_files.is_empty());
+        let dropped_path = ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()));
+        if let Some(path) = dropped_path {
+            let path = path.to_string_lossy().to_string();
+            debug!("dropped file: {path}");
+            match crate::probe::probe_video(&path) {
+                Ok(info) => self.load_video(path, info),
+                Err(e) => {
+                    log::warn!("drag-drop open failed: {e}");
+                    self.status = format!("Open failed: {e}");
+                }
+            }
+        }
+        if hovering_file {
+            ctx.request_repaint(); // keep the overlay live while a file is being dragged over the window
+            let screen = ctx.screen_rect();
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("dnd_overlay")));
+            painter.rect_filled(screen, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 190));
+            painter.rect_stroke(screen.shrink(14.0), 14.0, Stroke::new(3.0, C_IN));
+            painter.text(screen.center(), Align2::CENTER_CENTER, "Drop video to open",
+                FontId::proportional(26.0), TXT);
+        }
 
         // ── Draw UI ───────────────────────────────────────────────────────────
         egui::CentralPanel::default()
@@ -857,6 +949,9 @@ impl CutvApp {
                     .on_hover_text("Click: toggle crop editing · Right-click: clear crop");
                 if crop_resp.clicked() { self.toggle_crop_mode(); }
                 if crop_resp.secondary_clicked() { self.clear_crop(); }
+
+                ui.add_space(4.0);
+                if cbtn(ui, "📂 Open", TXT_DIM).clicked() { self.open_video(); }
             });
         });
     }
