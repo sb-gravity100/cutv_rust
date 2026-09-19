@@ -1,7 +1,10 @@
-# Points ffmpeg-sys-next (via the `vcpkg` crate) at the FFmpeg build vcpkg
-# installed with NVENC/NVDEC/CUVID/D3D11VA support:
+# gstreamer-rs's sys crates use pkg-config (via system-deps) to find
+# GStreamer, hence PKG_CONFIG_PATH/PKG_CONFIG pointing at vcpkg's install +
+# its bundled pkgconf.exe (no system pkg-config install needed). Built via:
 #   C:\vcpkg\bootstrap-vcpkg.bat
-#   C:\vcpkg\vcpkg.exe install "ffmpeg[nvcodec,avcodec,avformat,avfilter,swscale,swresample]:x64-windows"
-# Also needs LLVM/clang on the machine for bindgen (https://github.com/llvm/llvm-project/releases).
+#   C:\vcpkg\vcpkg.exe install "gstreamer[plugins-base,plugins-good,plugins-bad,libav]:x64-windows"
+# (the "nvcodec" feature currently fails to build in this vcpkg port —
+# missing D3D11 wiring, a vcpkg-side bug — so hardware decode isn't in yet.)
 [env]
-VCPKG_ROOT = "C:/vcpkg"
+PKG_CONFIG_PATH = "C:/vcpkg/installed/x64-windows/lib/pkgconfig"
+PKG_CONFIG = "C:/vcpkg/installed/x64-windows/tools/pkgconf/pkgconf.exe"

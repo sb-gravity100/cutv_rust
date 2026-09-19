@@ -8,8 +8,7 @@ use egui::{
     Align, Align2, Color32, FontId, Frame, Layout, Margin, Pos2, Rect, RichText,
     Sense, Stroke, Vec2, pos2, vec2,
 };
-use log::debug;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use log::{debug, trace};
 
 use crate::player::Player;
 use crate::probe::encode_args;
@@ -60,7 +59,16 @@ pub struct CutvApp {
     src_h:    u32,
     transport_w: f32,    // remembered width of the transport button row, for centering
 
-    player: Option<Player>, // None until the first update() tick resolves the window handle
+    player: Player,
+    video_tex: Option<egui::TextureHandle>,
+
+    // Measures decode throughput (frames actually delivered by Player::poll
+    // per second), not the UI's own repaint rate — the useful number for
+    // diagnosing "is the decoder keeping up" independent of egui's redraw
+    // cadence. Recomputed once a second from a rolling count.
+    frames_this_sec: u32,
+    fps_window_start: f64, // egui input time the current 1s window started
+    measured_fps: f32,
 
     cur_t:   f64,        // mirrors player.position each frame; authoritative between polls
     in_t:    f64,
@@ -94,6 +102,7 @@ impl CutvApp {
         debug!("src {src_w}x{src_h}  fps={fps:.3}  dur={duration:.3}s");
 
         let pending_thumbs = spawn_thumbs(path.clone(), duration, ctx.clone());
+        let player = Player::new(&path, duration, fps);
 
         CutvApp {
             ctx,
@@ -103,7 +112,11 @@ impl CutvApp {
             src_w,
             src_h,
             transport_w: 280.0,
-            player: None,
+            player,
+            video_tex: None,
+            frames_this_sec: 0,
+            fps_window_start: 0.0,
+            measured_fps: 0.0,
             cur_t: 0.0,
             in_t: 0.0,
             out_t: duration,
@@ -114,7 +127,7 @@ impl CutvApp {
             crop_mode: false,
             frame_hold_dir: 0,
             next_hold_tick: 0.0,
-            status: "Loading player...".into(),
+            status: "Space play  ←→ ±5s  ,. ±1f  I/O in/out  M mute  Enter cut".into(),
             cut_progress: 0.0,
             cut_result: Arc::new(Mutex::new(None)),
         }
@@ -123,20 +136,26 @@ impl CutvApp {
     // ── Playback controls ─────────────────────────────────────────────────────
 
     fn toggle_play(&mut self) {
-        let Some(player) = &mut self.player else { return; };
-        if player.paused { player.play(); } else { player.pause(); }
+        if self.player.paused { self.player.play(); } else { self.player.pause(); }
     }
 
     fn seek(&mut self, t: f64) {
-        let Some(player) = &self.player else { return; };
         let t = t.clamp(0.0, self.duration);
-        player.seek(t);
-        self.cur_t = t; // optimistic; corrected by the next poll() if mpv lands elsewhere
+        self.player.seek(t);
+        self.cur_t = t; // optimistic; corrected by the next poll() if the decoder lands elsewhere
+    }
+
+    /// Cheap keyframe-snap seek for while the timeline is actively being
+    /// dragged — see Player::seek_fast. Follow up with seek() once the drag
+    /// settles to land exactly on the intended frame.
+    fn seek_fast(&mut self, t: f64) {
+        let t = t.clamp(0.0, self.duration);
+        self.player.seek_fast(t);
+        self.cur_t = t;
     }
 
     fn step_frames(&mut self, n: i32) {
-        let Some(player) = &mut self.player else { return; };
-        player.step_frames(n);
+        self.player.step_frames(n);
     }
 
     /// Drives frame-by-frame hold-to-repeat for both the comma/period keys
@@ -153,21 +172,14 @@ impl CutvApp {
             self.step_frames(dir);
             self.next_hold_tick = now + 0.35; // initial delay before repeat kicks in
         } else if now >= self.next_hold_tick {
-            // Backward stepping goes through a precise seek (see
-            // Player::step_frames), which — like all seeks — is async in
-            // mpv with no completion signal from a fire-and-forget command.
-            // Skip issuing another one until mpv reports the previous seek
-            // has actually landed, or repeats queue up faster than mpv can
-            // finish them and keep "catching up" after input stops.
-            let still_seeking = dir < 0
-                && self.player.as_ref().is_some_and(Player::is_seeking);
-            if still_seeking {
-                debug!("frame hold: skip repeat, still seeking");
-            } else {
-                self.step_frames(dir);
-                let interval = (2.5 / self.fps.max(1.0)).max(0.03);
-                self.next_hold_tick = now + interval;
-            }
+            // The decode thread itself coalesces a backlog of rapid
+            // same-kind commands now (see video.rs's CmdSource), so unlike
+            // the old mpv-based player there's no need to throttle here to
+            // avoid a "catches up after release" lag — just keep issuing
+            // steps at a cadence scaled to the source frame rate.
+            self.step_frames(dir);
+            let interval = (2.5 / self.fps.max(1.0)).max(0.03);
+            self.next_hold_tick = now + interval;
         }
         ctx.request_repaint();
     }
@@ -196,7 +208,7 @@ impl CutvApp {
 
     fn toggle_mute(&mut self) {
         self.muted = !self.muted;
-        if let Some(player) = &mut self.player { player.set_mute(self.muted); }
+        self.player.set_mute(self.muted);
     }
 
     // TODO(Phase 3): wire to a real crop overlay + rect state.
@@ -219,9 +231,7 @@ impl CutvApp {
             self.status = "IN/OUT too close (< 0.1 s)".into();
             return;
         }
-        if let Some(player) = &mut self.player {
-            if !player.paused { player.pause(); }
-        }
+        if !self.player.paused { self.player.pause(); }
 
         let p      = Path::new(&self.path);
         let stem   = p.file_stem().unwrap_or_default().to_string_lossy();
@@ -298,48 +308,37 @@ impl CutvApp {
 // ── egui App trait ────────────────────────────────────────────────────────────
 
 impl eframe::App for CutvApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-
-        // ── Lazily create the player once we can resolve the real window handle ──
-        if self.player.is_none() {
-            match frame.window_handle() {
-                Ok(wh) => match wh.as_raw() {
-                    RawWindowHandle::Win32(h) => {
-                        let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
-                        match Player::new(hwnd, (0, 0, 16, 16), &self.path, self.fps) {
-                            Ok(p) => {
-                                self.player = Some(p);
-                                self.status =
-                                    "Space play  ←→ ±5s  ,. ±1f  I/O in/out  M mute  Enter cut".into();
-                                debug!("player ready");
-                            }
-                            Err(e) => {
-                                log::error!("player init failed: {e}");
-                                self.status = format!("player error: {e}");
-                            }
-                        }
-                    }
-                    _ => {
-                        self.status = "player error: not a Win32 window".into();
-                    }
-                },
-                Err(e) => {
-                    // Window not fully realized yet — retry next frame.
-                    debug!("window handle not ready yet: {e}");
-                }
-            }
-        }
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let t_update_start = std::time::Instant::now();
 
         // ── Poll player state ─────────────────────────────────────────────────
-        if let Some(player) = &mut self.player {
-            player.poll();
-            self.cur_t = player.position;
-            if player.duration > 0.0 {
-                self.duration = player.duration;
+        if let Some(f) = self.player.poll() {
+            let t0 = std::time::Instant::now();
+            let img = egui::ColorImage::from_rgb([f.w as usize, f.h as usize], &f.rgb);
+            let t1 = std::time::Instant::now();
+            match &mut self.video_tex {
+                Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
+                None => {
+                    self.video_tex =
+                        Some(ctx.load_texture("video", img, egui::TextureOptions::LINEAR));
+                }
             }
-            if !player.paused {
-                ctx.request_repaint();
-            }
+            trace!("frame upload: ColorImage {:?}  tex.set {:?}", t1 - t0, t0.elapsed() - (t1 - t0));
+            self.frames_this_sec += 1;
+        }
+        let now = ctx.input(|i| i.time);
+        if now - self.fps_window_start >= 1.0 {
+            self.measured_fps = self.frames_this_sec as f32 / (now - self.fps_window_start).max(0.001) as f32;
+            debug!("measured_fps={:.1}  paused={}", self.measured_fps, self.player.paused);
+            self.frames_this_sec = 0;
+            self.fps_window_start = now;
+        }
+        self.cur_t = self.player.position;
+        if self.player.duration > 0.0 {
+            self.duration = self.player.duration;
+        }
+        if !self.player.paused {
+            ctx.request_repaint();
         }
 
         // ── Poll pending thumbnails ───────────────────────────────────────────
@@ -395,7 +394,6 @@ impl eframe::App for CutvApp {
         };
 
         // ── Draw UI ───────────────────────────────────────────────────────────
-        let pixels_per_point = ctx.pixels_per_point();
         egui::CentralPanel::default()
             .frame(Frame::none()
                 .fill(BG)
@@ -404,7 +402,7 @@ impl eframe::App for CutvApp {
                 ui.spacing_mut().item_spacing   = Vec2::ZERO;
                 ui.spacing_mut().button_padding = vec2(10.0, 7.0);
 
-                self.ui_video(ui, pixels_per_point);
+                self.ui_video(ui);
                 self.ui_timeline(ui);
                 CutvApp::hsep(ui);
                 ui.add_space(7.0);
@@ -421,18 +419,21 @@ impl eframe::App for CutvApp {
                 self.ui_progress(ui);
                 self.ui_status(ui);
             });
+
+        if !self.player.paused {
+            trace!("update(): TOTAL {:?}", t_update_start.elapsed());
+        }
     }
 }
 
 // ── UI sections ───────────────────────────────────────────────────────────────
 
 impl CutvApp {
-    fn ui_video(&mut self, ui: &mut egui::Ui, pixels_per_point: f32) {
+    fn ui_video(&mut self, ui: &mut egui::Ui) {
         // Fill whatever space is left above the fixed-height chrome below,
-        // letterboxing to preserve the source aspect ratio. mpv renders
-        // directly into its own native child window at this screen
-        // location — egui just reserves the space and tells Player where
-        // that window should be (in physical pixels).
+        // letterboxing to preserve the source aspect ratio. Decoded frames
+        // arrive as an egui texture (see update()'s poll()), drawn directly
+        // here — no native child window, unlike the earlier mpv-based player.
         let avail_w = ui.available_width();
         let avail_h = (ui.available_height() - CHROME_H).max(50.0);
         let scale = (avail_w / self.src_w as f32).min(avail_h / self.src_h as f32);
@@ -443,12 +444,17 @@ impl CutvApp {
         ui.painter().rect_filled(outer, 0.0, BG_DRK);
         let rect = Rect::from_center_size(outer.center(), vec2(disp_w, disp_h));
 
-        if let Some(player) = &self.player {
-            player.set_rect(
-                (rect.left()   * pixels_per_point).round() as i32,
-                (rect.top()    * pixels_per_point).round() as i32,
-                (rect.width()  * pixels_per_point).round() as i32,
-                (rect.height() * pixels_per_point).round() as i32,
+        if let Some(tex) = &self.video_tex {
+            ui.painter().image(
+                tex.id(), rect,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            let dims = tex.size();
+            ui.painter().text(
+                pos2(outer.left() + 8.0, outer.top() + 6.0), Align2::LEFT_TOP,
+                format!("{:.0} fps  ·  decode {}x{}", self.measured_fps, dims[0], dims[1]),
+                FontId::monospace(11.0), Color32::from_rgba_unmultiplied(0xff, 0xff, 0xff, 160),
             );
         }
     }
@@ -466,7 +472,6 @@ impl CutvApp {
                 self.tl_drag = Some(self.tl_hit(x, tl_rect.width()));
             }
         }
-        if !resp.dragged() { self.tl_drag = None; }
 
         if resp.dragged() {
             if let Some(p) = resp.interact_pointer_pos() {
@@ -475,10 +480,22 @@ impl CutvApp {
                 match self.tl_drag {
                     Some(Drag::In)  => { self.in_t  = t.clamp(0.0, self.out_t); }
                     Some(Drag::Out) => { self.out_t = t.clamp(self.in_t, self.duration); }
-                    _               => { self.seek(t.clamp(0.0, self.duration)); }
+                    // Fast (keyframe-snap) seek while actively dragging —
+                    // an exact decode-to-target seek here would cost real
+                    // decode time on every dragged pointer move and make
+                    // scrubbing feel like it's hanging. Landed on exactly
+                    // once the drag settles, just below.
+                    _               => { self.seek_fast(t.clamp(0.0, self.duration)); }
                 }
             }
+        } else if resp.drag_stopped() && matches!(self.tl_drag, None | Some(Drag::Pos)) {
+            // Land exactly on the intended frame once the drag ends (an
+            // In/Out drag already carries its exact scrubbed timestamp —
+            // nothing further to do there).
+            self.seek(self.cur_t);
         }
+
+        if !resp.dragged() { self.tl_drag = None; }
 
         // A plain click (press+release with no movement) never fires
         // drag_started()/dragged(), so without this the playhead only
@@ -543,7 +560,7 @@ impl CutvApp {
         let pad   = ((avail - self.transport_w) * 0.5).max(0.0);
 
         let mut btn_dir = 0;
-        let playing = self.player.as_ref().map_or(false, |p| !p.paused);
+        let playing = !self.player.paused;
         let resp = ui.horizontal(|ui| {
             ui.add_space(pad);
 
