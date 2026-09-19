@@ -2,6 +2,10 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `65e35c8` · 2026-09-19 · tune: bump GIF export width cap to 800px
+- `src/gif.rs`
+- `PLAN.md`
+
 ### `cedc5b7` · 2026-09-19 · tune: restore gifski quality to 90, keep 20fps
 - `src/gif.rs`
 - `PLAN.md`
