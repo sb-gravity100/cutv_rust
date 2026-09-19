@@ -75,10 +75,17 @@ Playback was fast; seeking still wasn't ("takes maybe 500ms+", "+1/-1 frame does
 - [x] Baked `-vf crop=w:h:x:y` into `do_cut` whenever a crop is set (independent of whether the overlay is currently shown — only clearing it removes the filter). GIF export (Phase 4) still needs the same treatment once that lands.
 - [x] Confirmed working by the user (handles resize/move correctly, right-click clears, cropped CUT output dimensions match).
 
-## Phase 4 — GIF export
+## Phase 4 — GIF export (DONE 2026-09-19)
 
-- [ ] `gif.rs`: two-pass `palettegen`/`paletteuse` worker, respecting IN/OUT selection and active crop.
-- [ ] `GIF` button + `g` keyboard shortcut in the edit row.
+Original plan was ffmpeg's two-pass `palettegen`/`paletteuse`; redirected mid-phase to the `gifski` crate (https://github.com/imageoptim/gifski) per explicit direction — better quality/byte via its perceptual quantizer, and it's a Rust library rather than a second ffmpeg shell-out. See `PLAN.md`'s "GIF export design" for the full pipeline.
+
+- [x] `gif.rs` (new): `spawn_gif_export()` — ffmpeg extracts the IN→OUT range as raw RGBA frames (`-vf crop=...,scale=W:H:flags=lanczos,fps=10`, crop/scale/fps all in one pass, 640px-wide cap, from the **original source**, not the scrub proxy), fed to a `gifski::Collector` on one thread while a `gifski::Writer` writes the `.gif` on another (required — `gifski::new()`'s collector blocks once its queue fills until the writer is actively draining it).
+- [x] Respects `self.crop_rect` (same `to_vf()` used by `do_cut`) and the current IN/OUT selection.
+- [x] Progress reporting reuses `do_cut`'s existing `cut_progress_shared: Arc<Mutex<f32>>` bar (CUT and GIF export are mutually exclusive single actions, so no new UI/progress-bar code was needed) via a small `ProgressReporter` impl.
+- [x] `GIF` button (already stubbed in the edit row) + `G` keyboard shortcut, both wired to `do_gif()`.
+- [x] `cargo build --release` clean, `cargo clippy --release` clean (only pre-existing style lints elsewhere in the tree).
+- [x] Verified via a throwaway `src/bin/gif_test.rs` (written, run, deleted — not committed) calling `spawn_gif_export` directly: no-crop export produced a valid 640×360 `GIF89a` file; an 800×600 crop produced a valid 640×480 file (aspect correctly preserved, confirming the crop→scale dimension math).
+- [x] Update `FILE_INDEX.md`, `PLAN.md`.
 
 ## Phase 5 — NVENC/GPU encode
 

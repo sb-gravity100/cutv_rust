@@ -68,16 +68,24 @@ Proxy transcode time is proportional to source length/resolution (measured: ~10s
 ## Features to add (all approved, in priority order)
 
 1. ~~**Cut progress bar**~~ — done, see `PHASES.md` Phase 2.
-2. ~~**Crop tool**~~ — done, see `PHASES.md` Phase 3. `crop.rs`; applies to `do_cut`, still needs the same treatment in GIF export once that lands.
-3. **GIF export** — two-pass ffmpeg (palette generation via `palettegen`, then `paletteuse`) of the IN→OUT selection, mirrors reference's `_do_gif`.
+2. ~~**Crop tool**~~ — done, see `PHASES.md` Phase 3. `crop.rs`; applies to `do_cut` and (as of Phase 4) `do_gif`.
+3. ~~**GIF export**~~ — done, see `PHASES.md` Phase 4. Built on the `gifski` crate (https://github.com/imageoptim/gifski) instead of the originally-planned ffmpeg `palettegen`/`paletteuse` two-pass — gifski's perceptual quantizer/dithering gives noticeably better quality per byte than ffmpeg's palette filters, at the cost of pulling in a Rust dependency instead of shelling out twice.
 4. **NVENC/GPU encode** — detect `h264_nvenc`/`hevc_nvenc` availability (`ffmpeg -hide_banner -encoders`, cached), branch `probe::encode_args` to prefer GPU encoders with `-hwaccel cuda` on the input side when available, fall back to libx264/libx265 otherwise. Note: this is about the `PATH` ffmpeg's NVENC support for the final cut export, unrelated to GStreamer's (currently broken) `nvcodec` feature.
 
 ## Explicitly deferred
 
 - yt-dlp URL download support — lowest priority, separate concern (download + cache dir), not part of this phase.
 
+## GIF export design (`gif.rs`)
+
+ffmpeg still does frame *extraction* (it's already the project's only video I/O dependency, and its `-vf` chain already handles crop/scale/fps in one pass) but no longer does palette generation or GIF muxing — that's all `gifski` now:
+
+- ffmpeg decodes the IN→OUT range from the **original source** (not the scrub proxy, for quality) straight to `pipe:1` as raw RGBA frames (`-f rawvideo -pix_fmt rgba`), with `-vf` applying `crop=...` (if `self.crop_rect` is set, same string `do_cut` uses), then `scale=W:H:flags=lanczos` (capped to 640px wide, aspect-preserved, never upscaled), then `fps=10` — same defaults (640px/10fps) as the external Python reference's `_gif_w`/`_gif_fps`.
+- Two threads run concurrently, per `gifski::new()`'s documented contract (the `Collector` blocks once its queue fills until the `Writer` is actively draining it): one reads ffmpeg's stdout in exact `w*h*4`-byte frame chunks and calls `Collector::add_frame_rgba`; the other calls `Writer::write()` against the output `.gif` file with a `ProgressReporter` impl that updates the same `Arc<Mutex<f32>>` progress-bar pattern `do_cut` uses (reused directly — CUT and GIF export are mutually exclusive single actions, so sharing the field needed no new UI code).
+- `gifski::Settings.width`/`.height` are pinned to the *exact* dimensions ffmpeg already scaled to, so gifski's own internal auto-resize heuristic (which otherwise triggers based on total pixel count) never second-guesses the size.
+- Verified via a throwaway `src/bin/gif_test.rs` (not committed) that called `gif::spawn_gif_export` directly, once with no crop (640×360 output) and once with an 800×600 crop (confirmed output scaled to 640×480, aspect preserved) — both produced valid `GIF89a` files.
+
 ## Module plan for remaining phases
 
 - `probe.rs` — add `nvenc_available() -> bool` (cached), extend `encode_args` with the NVENC branch.
-- `app.rs` — `do_cut` gains `-hwaccel cuda` + progress parsing (both remaining); crop `-vf` injection already done.
-- `gif.rs` (new) — two-pass GIF export worker; reuse `self.crop_rect`'s `-vf` the same way `do_cut` does.
+- `app.rs` — `do_cut` gains `-hwaccel cuda` (remaining); progress parsing and crop `-vf` injection already done for both `do_cut` and `do_gif`.
