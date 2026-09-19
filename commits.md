@@ -2,6 +2,22 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `1a8fd93` · 2026-09-19 · docs: sync planning docs for Phase 6 polish (icon, Open, drag-drop, OS integration)
+- `FILE_INDEX.md`
+- `PHASES.md`
+- `PLAN.md`
+
+### `4069584` · 2026-09-19 · feat: add Open-file button and drag-and-drop video loading
+- `src/app.rs`
+
+### `03a76df` · 2026-09-19 · feat: add app icon (runtime window/taskbar + embedded exe resource)
+- `assets/icon.ico` (new)
+- `assets/icon-256.png` (new)
+- `build.rs` (new)
+- `src/main.rs`
+- `Cargo.toml`
+- `Cargo.lock`
+
 ### `38e7238` · 2026-09-19 · fix: match do_cut export bitrate to source instead of pure CQ/CRF
 - `src/probe.rs`
 - `PHASES.md`
