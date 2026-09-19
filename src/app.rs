@@ -96,6 +96,7 @@ pub struct CutvApp {
 
     status:       String,
     cut_progress: f32,
+    cut_progress_shared: Arc<Mutex<f32>>, // written by do_cut()'s worker thread as ffmpeg reports it
     cut_result:   Arc<Mutex<Option<CutResult>>>,
 }
 
@@ -141,6 +142,7 @@ impl CutvApp {
             next_hold_tick: 0.0,
             status: "Space play  ←→ ±5s  ,. ±1f  I/O in/out  M mute  Enter cut".into(),
             cut_progress: 0.0,
+            cut_progress_shared: Arc::new(Mutex::new(0.0)),
             cut_result: Arc::new(Mutex::new(None)),
         }
     }
@@ -262,8 +264,11 @@ impl CutvApp {
         let path       = self.path.clone();
         let in_t       = self.in_t;
         let out_t      = self.out_t;
+        let cut_dur    = (out_t - in_t).max(0.001);
         let cut_result = self.cut_result.clone();
+        let cut_progress = self.cut_progress_shared.clone();
         let ctx        = self.ctx.clone();
+        *cut_progress.lock().unwrap() = 0.0;
 
         thread::spawn(move || {
             let enc = encode_args(&path);
@@ -274,28 +279,78 @@ impl CutvApp {
                 "-t".to_string(), format!("{:.3}", out_t - in_t),
             ];
             args.extend(enc);
+            // Machine-readable progress on stdout, one `key=value` per
+            // line, ending each stanza with `progress=continue`/`end` —
+            // parsed below to drive the status-bar progress fill.
+            args.push("-progress".to_string());
+            args.push("pipe:1".to_string());
             args.push(out_path.clone());
 
             debug!("ffmpeg cut: {}", args.join(" "));
             let mut cmd = Command::new("ffmpeg");
-            cmd.args(&args).stderr(std::process::Stdio::piped());
+            cmd.args(&args)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
             #[cfg(target_os = "windows")]
             { use std::os::windows::process::CommandExt; cmd.creation_flags(0x08000000); }
 
-            let result = match cmd.output() {
-                Ok(o) if o.status.success() => {
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("cut exec error: {e}");
+                    *cut_result.lock().unwrap() = Some(CutResult::Err(e.to_string()));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+
+            // stderr has to be drained concurrently with stdout, or ffmpeg
+            // blocks writing to one full pipe while we're blocked reading
+            // the other — a classic pipe deadlock. Collect it on its own
+            // thread; only used for the error message if the cut fails.
+            let stderr = child.stderr.take().expect("stderr was piped");
+            let stderr_thread = thread::spawn(move || -> String {
+                use std::io::Read;
+                let mut buf = String::new();
+                let _ = std::io::BufReader::new(stderr).read_to_string(&mut buf);
+                buf
+            });
+
+            if let Some(stdout) = child.stdout.take() {
+                use std::io::BufRead;
+                for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                    // out_time_us (or the older out_time_ms, also actually
+                    // microseconds despite the name — a long-standing
+                    // ffmpeg quirk kept for backward compatibility) is the
+                    // encoder's current position into the cut.
+                    if let Some(v) = line.strip_prefix("out_time_us=")
+                        .or_else(|| line.strip_prefix("out_time_ms=")) {
+                        if let Ok(us) = v.parse::<f64>() {
+                            let frac = ((us / 1_000_000.0) / cut_dur).clamp(0.0, 1.0) as f32;
+                            *cut_progress.lock().unwrap() = frac;
+                            ctx.request_repaint();
+                        }
+                    }
+                }
+            }
+
+            let status = child.wait();
+            let stderr_text = stderr_thread.join().unwrap_or_default();
+
+            let result = match status {
+                Ok(s) if s.success() => {
                     let name = Path::new(&out_path)
                         .file_name().unwrap_or_default()
                         .to_string_lossy().to_string();
                     debug!("cut done: {name}");
+                    *cut_progress.lock().unwrap() = 1.0;
                     CutResult::Done(name)
                 }
-                Ok(o) => {
-                    let err = String::from_utf8_lossy(&o.stderr).to_string();
-                    log::warn!("cut failed: {err}");
-                    CutResult::Err(err)
+                Ok(s) => {
+                    log::warn!("cut failed (exit {s}): {stderr_text}");
+                    CutResult::Err(stderr_text)
                 }
-                Err(e) => { log::warn!("cut exec error: {e}"); CutResult::Err(e.to_string()) }
+                Err(e) => { log::warn!("cut wait error: {e}"); CutResult::Err(e.to_string()) }
             };
             *cut_result.lock().unwrap() = Some(result);
             ctx.request_repaint();
@@ -389,13 +444,16 @@ impl eframe::App for CutvApp {
             }
         }
 
-        // ── Check cut result ──────────────────────────────────────────────────
+        // ── Cut progress / result ─────────────────────────────────────────────
+        self.cut_progress = *self.cut_progress_shared.lock().unwrap();
         if let Ok(mut g) = self.cut_result.lock() {
             if let Some(r) = g.take() {
                 self.status = match r {
                     CutResult::Done(n)   => format!("Saved: {n}"),
                     CutResult::Err(msg)  => format!("Error: {}", &msg[..msg.len().min(80)]),
                 };
+                self.cut_progress = 0.0;
+                *self.cut_progress_shared.lock().unwrap() = 0.0;
             }
         }
 
