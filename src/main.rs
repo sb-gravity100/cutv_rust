@@ -36,12 +36,16 @@ fn main() -> Result<()> {
     debug!("opening: {filename}  src={}x{}  display={dw}x{dh}",
         info.width, info.height);
 
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png"))
+        .expect("bundled icon-256.png should always decode");
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(format!("CUTV  —  {filename}"))
             .with_inner_size([dw as f32, dh as f32 + 255.0])
             .with_min_inner_size([360.0, 280.0])
-            .with_resizable(true),
+            .with_resizable(true)
+            .with_icon(icon),
         ..Default::default()
     };
 
