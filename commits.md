@@ -2,6 +2,15 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `11d0c07` · 2026-09-19 · docs: sync planning docs for NVENC encode support (Phase 5)
+- `FILE_INDEX.md`
+- `PHASES.md`
+- `PLAN.md`
+
+### `4d44b72` · 2026-09-19 · feat: add NVENC/GPU encode branch to do_cut's export (Phase 5)
+- `src/probe.rs`
+- `.gitignore`
+
 ### `65e35c8` · 2026-09-19 · tune: bump GIF export width cap to 800px
 - `src/gif.rs`
 - `PLAN.md`
