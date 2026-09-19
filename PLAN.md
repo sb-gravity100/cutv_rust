@@ -5,6 +5,7 @@
 - Rust 2024 edition.
 - UI: `eframe`/`egui` 0.29 — immediate-mode GUI, custom-painted (no OS-native widgets).
 - Playback: **GStreamer's `playbin` via `gstreamer-rs`** (`gstreamer`/`gstreamer-app`/`gstreamer-video` crates) — see "Architecture decision" below for the full path here (mpv → hand-rolled `ffmpeg-next` decoder → GStreamer). playbin owns demuxing, decode, A/V sync, buffering, and seeking as one unit; audio is its own default sink (`autoaudiosink`), no separate audio code in this app. Video frames are pulled from an `appsink` as raw RGB and rendered as an egui texture (`src/player.rs`).
+- **Scrub proxy** (`src/proxy.rs`): on load, a short-GOP (every 8th frame a keyframe) background transcode of the source starts immediately; playback plays the original file until it's ready, then `Player` swaps over to it. This is what actually makes seeking both fast *and* frame-exact — see "The scrub proxy" section below. `do_cut`'s final export always uses the original file regardless.
 - Export/encode/probe: shells out to `ffmpeg`/`ffprobe` on `PATH` (must be installed, not vendored) for `do_cut`'s final export and `probe.rs`. Entirely separate from playback decode (GStreamer, in-process).
 - **Build-time dependency: GStreamer dev libs.** `gstreamer-rs`'s sys crates use `pkg-config`, which needs GStreamer's headers/libs + a `pkg-config`(`pkgconf`) binary — not just runtime DLLs. Set up on this machine via vcpkg, using this repo's own overlay port (`vcpkg-overlay/gstreamer/`, see below for why):
   ```
@@ -47,6 +48,22 @@ After landing GStreamer, playback measured a hard ~8.5-9fps ceiling (should be 3
 6. **Actual root cause: we were testing debug builds.** `cargo build --release` dropped `ColorImage::from_rgb` from ~96ms to **~1.7ms**, and measured playback hit a steady **30.0fps**. The D3D11 GPU-convert fix (step 4) is still correct and worth keeping — it removed a genuine 74x CPU bottleneck that would otherwise still cap release-build performance — but the dramatic "9fps in the app" symptom specifically was a debug-vs-release artifact layered on top of it. **Always test playback perf with `cargo build --release` / `cargo run --release`** — a debug build will look broken for this per-frame pixel-copy workload no matter how good the underlying pipeline is.
 
 Consequence for crop UI: rendering frames as an egui texture (rather than mpv's native child window) means the crop rubber-band can be drawn directly over the video texture in egui — no separate native overlay window needed. Simplifies Phase 3 versus the original libmpv-era plan.
+
+## The scrub proxy (2026-09-19) — why seeking needed more than gating
+
+Once playback itself was fast (steady 30/60fps, per above), the remaining complaint was seeking: 500ms+ per seek, and held frame-stepping/timeline-dragging looking completely frozen. Two separate problems, found by testing against `sample_60fps.mp4` (1920x1080@60fps, chosen specifically because it has a much longer GOP than the original test file):
+
+1. **The GOP is long.** `ffprobe`'s packet flags showed keyframes roughly every 4.2s / 250 frames on this source. `SeekFlags::ACCURATE` always decodes forward from the keyframe before the target to land exactly on it — so a seek's cost is bounded by GOP length, not by decode/convert speed (which were already fast per the low-FPS investigation). No amount of pipeline optimization fixes this; it's inherent to the encoding.
+2. **Rapid requests thrash each other.** Holding a frame-step button, or dragging the timeline, issues a new seek far faster than even a *fast* (`SeekFlags::KEY_UNIT`, keyframe-snap) seek can complete — each new `FLUSH` seek interrupts the previous one before it lands, so on a fast drag nothing ever actually completes (measured: 11+ seeks/sec during one drag, only 1 ever finished). Gating repeats on `Player::is_seeking()` (a flag set on `seek()`, cleared the next time `poll()` actually receives a frame) fixed the thrashing, but the user's read on this was correct: **gating just stops the cost from compounding, it doesn't remove it.**
+
+The real fix, and what regular video editors (Premiere, Resolve, etc.) actually do: transcode a **short-GOP scrub proxy** in the background and play that instead of the original for everything except final export. `proxy.rs`'s `spawn_proxy()` kicks this off on load (`-g 8 -keyint_min 8`, NVENC first with a libx264 `ultrafast` fallback); `app.rs`'s `update()` swaps `Player` over to it once ready, preserving position/play state. With a keyframe every 8 frames instead of every 250, an *exact* (`ACCURATE`) seek is cheap enough that there's no reason to trade accuracy for speed at all — **`seek_fast`/`KEY_UNIT` was removed entirely** per explicit direction ("do not use fast seek at all"); every seek in the app is now frame-exact.
+
+Two more bugs found and fixed in the same pass, both root-caused by testing against real interaction rather than synthetic scripted input:
+
+- **Frame 0 never rendered on load**, and the picture looked frozen after *any* seek while paused (which is most of scrubbing/stepping): `appsink` delivers a frame two different ways depending on pipeline state — a **preroll** buffer while `PAUSED` (initial load, and every seek issued while paused), vs a regular **sample** while `PLAYING`. `Player::poll()` only ever called `try_pull_sample()`, which never catches preroll buffers — so essentially all paused-state frames were silently dropped. Fixed by trying `try_pull_preroll()` first, falling back to `try_pull_sample()`.
+- **Seeking right after the proxy swap failed** ("Failed to seek"): a freshly-constructed `Player`'s pipeline hasn't finished prerolling by the time `set_state(Paused)` returns (it's an async state change). Fixed by blocking on `pipeline.state(timeout)` in `Player::new()` until the state change actually completes before returning.
+
+Proxy transcode time is proportional to source length/resolution (measured: ~10s for a 1.5min 1080p60 source, ~29s for a ~5min 2340x1080 source, both via NVENC) — noticeable but not blocking, since playback works on the original file the whole time.
 
 ## Features to add (all approved, in priority order)
 

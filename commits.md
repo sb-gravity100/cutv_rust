@@ -2,6 +2,12 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `06f12ea` · 2026-09-19 · feat: add short-GOP scrub proxy for fast, frame-exact seeking
+- `src/app.rs`
+- `src/main.rs`
+- `src/player.rs`
+- `src/proxy.rs` (new)
+
 ### `10efb66` · 2026-09-19 · fix: enable ORC in vcpkg's gstreamer build via overlay port
 - `.gitattributes` (new)
 - `src/player.rs`
