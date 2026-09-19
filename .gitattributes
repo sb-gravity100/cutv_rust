@@ -1,0 +1,5 @@
+# vcpkg patch/diff files are line-ending sensitive — force LF regardless of
+# core.autocrlf, or `git apply`/patch application breaks for anyone who
+# checks this repo out with CRLF conversion on (the Windows default).
+vcpkg-overlay/**/*.patch text eol=lf
+vcpkg-overlay/**/*.diff  text eol=lf

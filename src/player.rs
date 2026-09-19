@@ -67,21 +67,22 @@ impl Player {
             .expect("no 'playbin' element — is GStreamer's plugins-base installed?");
 
         // Colorspace conversion (planar YUV from the decoder -> interleaved
-        // RGB for egui) via the GPU (D3D11) — this vcpkg build has ORC (the
-        // SIMD codegen library GStreamer's own CPU `videoconvert` needs for
-        // real speed) disabled, which made plain `videoconvert` ~75x slower
-        // than it should be (measured: 8.8 fps vs 640+ fps with this D3D11
-        // path, for a 2340x1080 source — see PHASES.md). d3d11upload is a
-        // no-op if the decoder already produced a D3D11 surface (it does,
-        // when d3d11h264dec auto-wins decodebin's element-ranking); falls
-        // back to plain `videoconvert` on a machine with no D3D11 device.
+        // RGB for egui) prefers the GPU (D3D11) path: it's faster still
+        // (~640fps vs ~175fps measured for a 2340x1080 source, now that
+        // vcpkg-overlay/gstreamer's ORC fix makes CPU videoconvert fast
+        // too — see PLAN.md's "low-FPS investigation") and offloads work
+        // from the CPU entirely. d3d11upload is a no-op if the decoder
+        // already produced a D3D11 surface (it does, when d3d11h264dec
+        // auto-wins decodebin's element-ranking). Falls back to plain
+        // `videoconvert` on a machine with no D3D11 device — a solid
+        // fallback now, not just "won't hang", now that ORC is enabled.
         let video_sink_bin = gst::parse::bin_from_description(
             "d3d11upload ! d3d11convert ! video/x-raw(memory:D3D11Memory),format=RGB ! \
              d3d11download ! appsink name=cutv_sink caps=video/x-raw,format=RGB sync=true",
             true,
         )
         .or_else(|e| {
-            warn!("D3D11 video sink unavailable ({e}), falling back to CPU videoconvert (slower)");
+            warn!("D3D11 video sink unavailable ({e}), falling back to CPU videoconvert");
             gst::parse::bin_from_description(
                 "videoconvert ! appsink name=cutv_sink caps=video/x-raw,format=RGB sync=true",
                 true,
