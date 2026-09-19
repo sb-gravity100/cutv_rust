@@ -87,12 +87,15 @@ Original plan was ffmpeg's two-pass `palettegen`/`paletteuse`; redirected mid-ph
 - [x] Verified via a throwaway `src/bin/gif_test.rs` (written, run, deleted — not committed) calling `spawn_gif_export` directly: no-crop export produced a valid 640×360 `GIF89a` file; an 800×600 crop produced a valid 640×480 file (aspect correctly preserved, confirming the crop→scale dimension math).
 - [x] Update `FILE_INDEX.md`, `PLAN.md`.
 
-## Phase 5 — NVENC/GPU encode
+## Phase 5 — NVENC/GPU encode (DONE 2026-09-19)
 
 Note: `do_cut`'s final export shells out to `ffmpeg.exe`/`ffprobe.exe` on `PATH` — entirely separate from GStreamer (used only for playback decode). This phase is about the `PATH` ffmpeg's NVENC support.
 
-- [ ] `probe::nvenc_available()` (cached, greps `ffmpeg -hide_banner -encoders`).
-- [ ] Extend `probe::encode_args` with GPU branch (`h264_nvenc`/`hevc_nvenc`) + `-hwaccel cuda` on the input side, falling back to CPU encoders when unavailable.
+- [x] `probe::nvenc_available()` — cached (`OnceLock<bool>`, shells out at most once per process), checks `ffmpeg -hide_banner -encoders` for `h264_nvenc`.
+- [x] `probe::encode_args` gained an `nvenc_v_map` (h264→`h264_nvenc`, hevc→`hevc_nvenc`, both with a shared `NVENC_OPTS` rate-control preset — VBR, `-cq 18`, spatial/temporal AQ, 32-frame lookahead) consulted first when NVENC is available, falling through to the existing CPU `cpu_v_map` for every other codec (vp9/vp8/av1/mpeg4/mpeg2video/prores) and as the fallback when NVENC isn't available at all. Mirrors the external Python reference's `_encode_args`/`_NVENC_OPTS` exactly, so exports from both tools land on the same settings. No `-hwaccel cuda` on the input side — the reference doesn't use one either; NVENC's encode-side benefit doesn't depend on GPU-accelerated decode.
+- [x] Verified via a throwaway `src/bin/probe_test.rs` (written, run, deleted — not committed): confirmed `nvenc_available()` returns `true` on this machine (RTX 3050, `ffmpeg -encoders` lists `h264_nvenc`/`hevc_nvenc`/`av1_nvenc`) and `encode_args("sample.mp4")` (h264 source) correctly picks `h264_nvenc` with the full `NVENC_OPTS` set.
+- [x] `cargo build --release` and `cargo clippy --release` both clean.
+- [x] Update `FILE_INDEX.md`, `PLAN.md`.
 
 ## Deferred (not scheduled)
 

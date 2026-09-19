@@ -70,7 +70,7 @@ Proxy transcode time is proportional to source length/resolution (measured: ~10s
 1. ~~**Cut progress bar**~~ — done, see `PHASES.md` Phase 2.
 2. ~~**Crop tool**~~ — done, see `PHASES.md` Phase 3. `crop.rs`; applies to `do_cut` and (as of Phase 4) `do_gif`.
 3. ~~**GIF export**~~ — done, see `PHASES.md` Phase 4. Built on the `gifski` crate (https://github.com/imageoptim/gifski) instead of the originally-planned ffmpeg `palettegen`/`paletteuse` two-pass — gifski's perceptual quantizer/dithering gives noticeably better quality per byte than ffmpeg's palette filters, at the cost of pulling in a Rust dependency instead of shelling out twice.
-4. **NVENC/GPU encode** — detect `h264_nvenc`/`hevc_nvenc` availability (`ffmpeg -hide_banner -encoders`, cached), branch `probe::encode_args` to prefer GPU encoders with `-hwaccel cuda` on the input side when available, fall back to libx264/libx265 otherwise. Note: this is about the `PATH` ffmpeg's NVENC support for the final cut export, unrelated to GStreamer's (currently broken) `nvcodec` feature.
+4. ~~**NVENC/GPU encode**~~ — done, see `PHASES.md` Phase 5. `probe::nvenc_available()` (cached) + `probe::encode_args`'s NVENC branch. Note: this is about the `PATH` ffmpeg's NVENC support for the final cut export, unrelated to GStreamer's (currently broken) `nvcodec` feature.
 
 ## Explicitly deferred
 
@@ -87,5 +87,4 @@ ffmpeg still does frame *extraction* (it's already the project's only video I/O 
 
 ## Module plan for remaining phases
 
-- `probe.rs` — add `nvenc_available() -> bool` (cached), extend `encode_args` with the NVENC branch.
-- `app.rs` — `do_cut` gains `-hwaccel cuda` (remaining); progress parsing and crop `-vf` injection already done for both `do_cut` and `do_gif`.
+All planned phases are complete as of 2026-09-19; only the explicitly-deferred yt-dlp URL support remains unscheduled.
