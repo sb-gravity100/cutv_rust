@@ -7,6 +7,7 @@ File system index with tags and one-line descriptions. Update whenever files are
 - `Cargo.toml` — `[build]` crate manifest, dependencies (eframe/egui, gstreamer/gstreamer-app/gstreamer-video, chrono, anyhow, log, env_logger, serde_json).
 - `Cargo.lock` — `[build]` pinned dependency versions.
 - `.cargo/config.toml` — `[build]` sets `PKG_CONFIG_PATH`/`PKG_CONFIG` so `gstreamer-rs`'s sys crates find vcpkg's GStreamer automatically. See `PLAN.md` for the vcpkg setup this depends on (and the `GST_PLUGIN_PATH`/`PATH` runtime env vars, set separately as persistent user env vars, not via this file).
+- `vcpkg-overlay/gstreamer/` — `[build]` vcpkg overlay port: copy of upstream `gstreamer` with `-Dorc=enabled` + pre-vendors ORC 0.4.42 into `subprojects/orc` (upstream disables ORC — GStreamer's SIMD codegen lib — because vcpkg has no port for it under that name; see PLAN.md's "low-FPS investigation"). Passed via `vcpkg install --overlay-ports=vcpkg-overlay ...`.
 - `CLAUDE.md` — `[docs]` session rules + project architecture guidance for Claude Code.
 - `.gitignore` — `[build]` ignores `/target`.
 

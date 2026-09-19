@@ -2,6 +2,11 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `10efb66` · 2026-09-19 · fix: enable ORC in vcpkg's gstreamer build via overlay port
+- `.gitattributes` (new)
+- `src/player.rs`
+- `vcpkg-overlay/gstreamer/` (new)
+
 ### `9f98014` · 2026-09-19 · feat: switch playback from hand-rolled ffmpeg-next decoder to GStreamer playbin
 - `.cargo/config.toml`
 - `Cargo.lock`
