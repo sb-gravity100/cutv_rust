@@ -71,6 +71,7 @@ Proxy transcode time is proportional to source length/resolution (measured: ~10s
 2. ~~**Crop tool**~~ — done, see `PHASES.md` Phase 3. `crop.rs`; applies to `do_cut` and (as of Phase 4) `do_gif`.
 3. ~~**GIF export**~~ — done, see `PHASES.md` Phase 4. Built on the `gifski` crate (https://github.com/imageoptim/gifski) instead of the originally-planned ffmpeg `palettegen`/`paletteuse` two-pass — gifski's perceptual quantizer/dithering gives noticeably better quality per byte than ffmpeg's palette filters, at the cost of pulling in a Rust dependency instead of shelling out twice.
 4. ~~**NVENC/GPU encode**~~ — done, see `PHASES.md` Phase 5. `probe::nvenc_available()` (cached) + `probe::encode_args`'s NVENC branch. Note: this is about the `PATH` ffmpeg's NVENC support for the final cut export, unrelated to GStreamer's (currently broken) `nvcodec` feature.
+5. ~~**Polish: icon, Open button, OS integration**~~ — done, see `PHASES.md` Phase 6. App icon (runtime + embedded `.exe` resource), `Open` file-picker button, Explorer "Cut with CUTV" context menu entry, `cutv` CLI launcher repointed at this build.
 
 ## Explicitly deferred
 

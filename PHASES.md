@@ -98,6 +98,17 @@ Note: `do_cut`'s final export shells out to `ffmpeg.exe`/`ffprobe.exe` on `PATH`
 - [x] `cargo build --release` and `cargo clippy --release` both clean.
 - [x] Update `FILE_INDEX.md`, `PLAN.md`.
 
+## Phase 6 — polish: app icon, Open button, OS integration (DONE 2026-09-19)
+
+- [x] `assets/icon.ico`/`assets/icon-256.png` (new, generated via a throwaway Pillow script, not part of the build): a dark rounded-square badge with a white play triangle and green/red IN/OUT brackets either side, echoing the app's own timeline marker colors (`C_IN`/`C_OUT` in `app.rs`).
+- [x] Runtime window/taskbar icon: `main.rs` loads `assets/icon-256.png` via `eframe::icon_data::from_png_bytes` (already an eframe helper — no new dependency) and sets it via `ViewportBuilder::with_icon`.
+- [x] `.exe`'s own icon (Explorer/taskbar-before-launch/context-menu default icon): `build.rs` (new) + `winres` build-dependency embed `assets/icon.ico` as a Windows PE resource.
+- [x] `Open` button (`📂 Open`, edit row, next to `CROP`): native file picker via the `rfd` crate (new dependency — plain Win32 common dialog on Windows, no extra runtime deps), `open_video()` → `load_video()`. `load_video()` re-initializes everything `CutvApp::new()` does (probe, `Player`, scrub proxy, thumbnails, IN/OUT/crop/status reset, window title) in place, and explicitly deletes the *previous* proxy's temp file (only the proxy active at `Drop` time gets cleaned up automatically otherwise).
+- [x] Drag & drop: dropping a video file anywhere on the window calls the same `load_video()` path as `Open` — no new dependency, egui/winit deliver dropped-file paths natively (`ctx.input(|i| i.raw.dropped_files)`, enabled by default on Windows). A full-window dark overlay with a green border and "Drop video to open" (`ctx.input(|i| i.raw.hovered_files)`, drawn on egui's `Order::Foreground` layer) gives live feedback while a file is being dragged over the window, before it's dropped.
+- [x] **Explorer integration (outside the repo, not tracked by git):** `HKCU\Software\Classes\SystemFileAssociations\video\shell\CutWithCUTV` registered (no admin needed, user-scoped, reversible) — adds "Cut with CUTV" to the right-click context menu for any file Windows already classifies as a video (covers mp4/mov/avi/mkv/webm by default). `C:\cli_tools\scripts\cutv.bat` (the `cutv` command on `PATH`, outside the repo) repointed from the Python reference (`cutv.py`) to this Rust build's release exe — the Rust version now has full feature parity-plus (GIF export, crop, NVENC, bitrate matching) and is the one meant to be used day to day.
+- [x] `cargo build --release` and `cargo clippy --release` both clean; app launched and verified (both via `cargo run --release` and via the repointed `cutv.bat`) to load `sample.mp4` correctly with the new icon/button in place.
+- [x] Update `FILE_INDEX.md`, `PLAN.md`.
+
 ## Deferred (not scheduled)
 
 - yt-dlp URL download support.
