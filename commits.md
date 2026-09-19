@@ -2,6 +2,19 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `f70a038` · 2026-09-19 · docs: sync planning docs for gifski-based GIF export (Phase 4)
+- `FILE_INDEX.md`
+- `PHASES.md`
+- `PLAN.md`
+
+### `5872a60` · 2026-09-19 · feat: add GIF export via gifski, wired to GIF button + G shortcut
+- `.gitignore`
+- `Cargo.lock`
+- `Cargo.toml`
+- `src/app.rs`
+- `src/main.rs`
+- `src/gif.rs` (new)
+
 ### `740fc4a` · 2026-09-19 · feat: add resizable crop overlay, applied to CUT export
 - `.gitignore`
 - `src/app.rs`
