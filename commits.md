@@ -2,6 +2,12 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `740fc4a` · 2026-09-19 · feat: add resizable crop overlay, applied to CUT export
+- `.gitignore`
+- `src/app.rs`
+- `src/main.rs`
+- `src/crop.rs` (new)
+
 ### `23c63c7` · 2026-09-19 · feat: parse ffmpeg -progress output for a live cut progress bar
 - `src/app.rs`
 

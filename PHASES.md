@@ -68,11 +68,12 @@ Playback was fast; seeking still wasn't ("takes maybe 500ms+", "+1/-1 frame does
 - [x] **Bug found and fixed along the way:** `do_cut`'s output path was landing at the filesystem root instead of the source's directory for a bare relative filename (`Path::parent()` returns `Some("")`, not `None`, for a path with no directory component — the old `unwrap_or(".")` fallback never triggered). Fixed via `PathBuf::join` instead of manual string formatting.
 - [x] Confirmed working by the user.
 
-## Phase 3 — crop tool
+## Phase 3 — crop tool (DONE 2026-09-19)
 
-- [ ] Right-drag rubber-band drawn directly over the video texture in egui (no native overlay window needed — GStreamer's frames render as an egui texture, not a native child window) → crop rect in canvas coords → map to source-pixel coords.
-- [ ] `CROP` toggle button in the edit row.
-- [ ] Bake `-vf crop=...` into `do_cut` (and GIF export once Phase 4 lands) when a crop is set.
+- [x] `crop.rs`: resizable/movable crop rect drawn directly over the video texture in egui (no native overlay window needed — GStreamer's frames render as an egui texture, not a native child window). Stored in source-pixel coords, converted to/from canvas coords via `to_canvas`/`canvas_to_source_delta`. 8 drag handles (N/S/E/W + 4 corners) via `hit_test`/`apply_drag`, plus drag-to-move from inside the rect.
+- [x] `CROP` toggle button in the edit row (existing `cbtn` helper) — click toggles the editing overlay, right-click clears the crop entirely. A default centered 80% rect appears the first time crop mode is turned on.
+- [x] Baked `-vf crop=w:h:x:y` into `do_cut` whenever a crop is set (independent of whether the overlay is currently shown — only clearing it removes the filter). GIF export (Phase 4) still needs the same treatment once that lands.
+- [x] Confirmed working by the user (handles resize/move correctly, right-click clears, cropped CUT output dimensions match).
 
 ## Phase 4 — GIF export
 

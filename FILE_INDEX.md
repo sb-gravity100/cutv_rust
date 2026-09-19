@@ -14,7 +14,8 @@ File system index with tags and one-line descriptions. Update whenever files are
 ## `src/`
 
 - `main.rs` — `[entry]` resolves target video path, probes it, sizes the window, launches `eframe` with `app::CutvApp`.
-- `app.rs` — `[ui][state]` `CutvApp` (`eframe::App` impl) — owns all playback/UI state, egui drawing (video frame, timeline, transport, edit row, status bar, FPS counter), keyboard shortcuts, `do_cut()` export. Constructs `Player` directly (no native window handle needed — frames render as an egui texture).
+- `app.rs` — `[ui][state]` `CutvApp` (`eframe::App` impl) — owns all playback/UI state, egui drawing (video frame, timeline, transport, edit row, status bar, FPS counter, crop overlay), keyboard shortcuts, `do_cut()` export (bakes in `-vf crop=...` whenever a crop is set). Constructs `Player` directly (no native window handle needed — frames render as an egui texture).
+- `crop.rs` — `[feature]` resizable/movable crop rectangle (`CropRect`, source-pixel coords) drawn directly over the video texture in egui; `to_canvas`/`canvas_to_source_delta` for coordinate mapping, `hit_test`/`apply_drag` for the 8 resize handles + move-by-drag-inside, `to_vf()` for the ffmpeg `-vf crop=...` string. `app.rs`'s `ui_crop_overlay` drives it.
 - `player.rs` — `[playback]` `Player` — wraps a GStreamer `playbin` pipeline (`play`/`pause`/`seek`/`step_frames`/`set_mute`/`poll`/`is_seeking`). Every seek is frame-exact (`SeekFlags::ACCURATE`) — no `seek_fast`/keyframe-snap variant; see PLAN.md's "The scrub proxy" for why that tradeoff isn't needed. Video frames pulled from an `appsink` (via a GPU `d3d11upload!d3d11convert!...` colorspace-conversion bin, falling back to CPU `videoconvert`) as raw RGB for the caller to upload as a texture — `poll()` tries both `try_pull_preroll()` and `try_pull_sample()` since appsink delivers frames differently depending on pipeline state (paused vs playing). Audio is playbin's own default sink — no separate audio code. Has detailed `trace!`/`debug!` timing instrumentation (see PLAN.md's "low-FPS investigation") — `RUST_LOG=trace` for per-frame numbers.
 - `proxy.rs` — `[playback]` `spawn_proxy` — background-thread ffmpeg transcode of the source into a short-GOP (every 8th frame a keyframe) scrub proxy, NVENC first with a libx264 `ultrafast` fallback. `app.rs` swaps `Player` over to it once ready, preserving position/play state; `do_cut()` always uses the original file regardless. See PLAN.md's "The scrub proxy".
 - `thumbs.rs` — `[playback][thumbnails]` `spawn_thumbs` — background-thread ffmpeg single-frame grabs for the timeline thumbnail strip (N=24), independent of `Player`.
@@ -25,7 +26,6 @@ File system index with tags and one-line descriptions. Update whenever files are
 
 ## Planned / not yet created
 
-- `crop.rs` — `[feature]` crop rubber-band state + coordinate mapping; draws directly over the video texture in egui (no overlay window needed — see PLAN.md).
 - `gif.rs` — `[feature]` two-pass GIF export (palette generation + paletteuse).
 
 ## Removed (architecture history — see PLAN.md's "Architecture decision")

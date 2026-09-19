@@ -67,8 +67,8 @@ Proxy transcode time is proportional to source length/resolution (measured: ~10s
 
 ## Features to add (all approved, in priority order)
 
-1. **Cut progress bar** — parse `ffmpeg -progress pipe:1` output during `do_cut`'s export (currently a blocking `.output()` call; needs to become `Stdio::piped()` + a stdout line reader in the worker thread, draining stderr in parallel to avoid pipe deadlock). Thin egui `Rect` fill in the status bar, same idea as reference's `_set_progress`.
-2. **Crop tool** — rubber-band selection over the video, stored as `(x, y, w, h)` in source-pixel coordinates, baked into `do_cut`'s ffmpeg args as `-vf crop=...`. Also applies to GIF export. Draws directly over the video texture in egui (see above).
+1. ~~**Cut progress bar**~~ — done, see `PHASES.md` Phase 2.
+2. ~~**Crop tool**~~ — done, see `PHASES.md` Phase 3. `crop.rs`; applies to `do_cut`, still needs the same treatment in GIF export once that lands.
 3. **GIF export** — two-pass ffmpeg (palette generation via `palettegen`, then `paletteuse`) of the IN→OUT selection, mirrors reference's `_do_gif`.
 4. **NVENC/GPU encode** — detect `h264_nvenc`/`hevc_nvenc` availability (`ffmpeg -hide_banner -encoders`, cached), branch `probe::encode_args` to prefer GPU encoders with `-hwaccel cuda` on the input side when available, fall back to libx264/libx265 otherwise. Note: this is about the `PATH` ffmpeg's NVENC support for the final cut export, unrelated to GStreamer's (currently broken) `nvcodec` feature.
 
@@ -79,6 +79,5 @@ Proxy transcode time is proportional to source length/resolution (measured: ~10s
 ## Module plan for remaining phases
 
 - `probe.rs` — add `nvenc_available() -> bool` (cached), extend `encode_args` with the NVENC branch.
-- `app.rs` — `do_cut` gains `-hwaccel cuda` + crop `-vf` injection + progress parsing; new `CROP`/`GIF` buttons already stubbed in the edit row (existing `cbtn`/`tbtn` helpers) — `toggle_crop_mode`/`do_gif` just need real implementations.
-- `crop.rs` (new) — crop state, canvas↔source coordinate mapping; draws directly over the video texture in egui.
-- `gif.rs` (new) — two-pass GIF export worker.
+- `app.rs` — `do_cut` gains `-hwaccel cuda` + progress parsing (both remaining); crop `-vf` injection already done.
+- `gif.rs` (new) — two-pass GIF export worker; reuse `self.crop_rect`'s `-vf` the same way `do_cut` does.
