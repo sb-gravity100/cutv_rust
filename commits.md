@@ -2,6 +2,13 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `b770f59` · 2026-09-19 · docs: record context-menu fix (per-extension) and console-suppression fix
+- `FILE_INDEX.md`
+- `PHASES.md`
+
+### `fd88e5d` · 2026-09-19 · fix: suppress console window on standalone launch
+- `src/main.rs`
+
 ### `1a8fd93` · 2026-09-19 · docs: sync planning docs for Phase 6 polish (icon, Open, drag-drop, OS integration)
 - `FILE_INDEX.md`
 - `PHASES.md`
