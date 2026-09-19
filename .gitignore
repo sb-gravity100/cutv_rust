@@ -2,3 +2,7 @@
 
 # local test videos, not project source
 sample.mp4
+sample_60fps.mp4
+
+# do_cut() output — <stem>_cut_<timestamp>.<ext>, ephemeral test artifacts
+*_cut_*.mp4

@@ -1,4 +1,5 @@
 mod app;
+mod crop;
 mod player;
 mod probe;
 mod proxy;

@@ -10,6 +10,7 @@ use egui::{
 };
 use log::{debug, trace};
 
+use crate::crop::{self, CropRect, Handle as CropHandle};
 use crate::player::Player;
 use crate::probe::encode_args;
 use crate::proxy::spawn_proxy;
@@ -90,6 +91,8 @@ pub struct CutvApp {
     tl_drag: Option<Drag>,
 
     crop_mode: bool,
+    crop_rect: Option<CropRect>, // in source-pixel coords; applies to do_cut() whenever Some, independent of crop_mode
+    crop_drag: Option<CropHandle>,
 
     frame_hold_dir: i32,   // active hold-to-repeat direction: -1, 0, or 1
     next_hold_tick: f64,   // egui input time the next repeat step fires at
@@ -138,6 +141,8 @@ impl CutvApp {
             pending_thumbs,
             tl_drag: None,
             crop_mode: false,
+            crop_rect: None,
+            crop_drag: None,
             frame_hold_dir: 0,
             next_hold_tick: 0.0,
             status: "Space play  ←→ ±5s  ,. ±1f  I/O in/out  M mute  Enter cut".into(),
@@ -221,14 +226,23 @@ impl CutvApp {
         self.player.set_mute(self.muted);
     }
 
-    // TODO(Phase 3): wire to a real crop overlay + rect state.
     fn toggle_crop_mode(&mut self) {
         self.crop_mode = !self.crop_mode;
+        if self.crop_mode && self.crop_rect.is_none() {
+            self.crop_rect = Some(CropRect::default_for(self.src_w, self.src_h));
+        }
         self.status = if self.crop_mode {
-            "crop mode on — overlay not wired yet".into()
+            "Crop: drag handles to resize, drag inside to move".into()
         } else {
-            "crop mode off".into()
+            "crop mode off — crop still applies to CUT until cleared".into()
         };
+    }
+
+    /// Clears any set crop entirely (not just the editing overlay).
+    fn clear_crop(&mut self) {
+        self.crop_rect = None;
+        self.crop_mode = false;
+        self.status = "crop cleared".into();
     }
 
     // TODO(Phase 4): real two-pass palette GIF export.
@@ -265,6 +279,7 @@ impl CutvApp {
         let in_t       = self.in_t;
         let out_t      = self.out_t;
         let cut_dur    = (out_t - in_t).max(0.001);
+        let crop_rect  = self.crop_rect;
         let cut_result = self.cut_result.clone();
         let cut_progress = self.cut_progress_shared.clone();
         let ctx        = self.ctx.clone();
@@ -279,6 +294,10 @@ impl CutvApp {
                 "-t".to_string(), format!("{:.3}", out_t - in_t),
             ];
             args.extend(enc);
+            if let Some(r) = crop_rect {
+                args.push("-vf".to_string());
+                args.push(r.to_vf());
+            }
             // Machine-readable progress on stdout, one `key=value` per
             // line, ending each stanza with `progress=continue`/`end` —
             // parsed below to drive the status-bar progress fill.
@@ -544,7 +563,7 @@ impl CutvApp {
         let disp_w = self.src_w as f32 * scale;
         let disp_h = self.src_h as f32 * scale;
 
-        let (outer, _) = ui.allocate_exact_size(vec2(avail_w, avail_h), Sense::hover());
+        let (outer, resp) = ui.allocate_exact_size(vec2(avail_w, avail_h), Sense::click_and_drag());
         ui.painter().rect_filled(outer, 0.0, BG_DRK);
         let rect = Rect::from_center_size(outer.center(), vec2(disp_w, disp_h));
 
@@ -561,6 +580,49 @@ impl CutvApp {
                 FontId::monospace(11.0), Color32::from_rgba_unmultiplied(0xff, 0xff, 0xff, 160),
             );
         }
+
+        if self.crop_mode {
+            self.ui_crop_overlay(ui, rect, &resp);
+        }
+    }
+
+    /// Draws the crop rectangle over `rect` (the video's on-screen display
+    /// area) and handles dragging its handles/body — see crop.rs. `resp` is
+    /// the same click-and-drag response `ui_video` allocated for the whole
+    /// video area, reused here rather than allocating a second one.
+    fn ui_crop_overlay(&mut self, ui: &mut egui::Ui, rect: Rect, resp: &egui::Response) {
+        const HANDLE_R: f32 = 10.0;
+        let Some(crop_r) = self.crop_rect else { return };
+        let canvas_crop = crop::to_canvas(rect, self.src_w, self.src_h, crop_r);
+
+        if resp.drag_started() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                self.crop_drag = crop::hit_test(canvas_crop, p, HANDLE_R);
+            }
+        }
+        if resp.dragged() {
+            if let Some(handle) = self.crop_drag {
+                let delta = crop::canvas_to_source_delta(rect, self.src_w, self.src_h, resp.drag_delta());
+                let mut r = crop_r;
+                crop::apply_drag(&mut r, handle, delta, self.src_w as f32, self.src_h as f32);
+                r.clamp_to(self.src_w as f32, self.src_h as f32);
+                self.crop_rect = Some(r);
+            }
+        } else {
+            self.crop_drag = None;
+            // Hover feedback even before a drag starts.
+            if let Some(p) = resp.hover_pos() {
+                if let Some(h) = crop::hit_test(canvas_crop, p, HANDLE_R) {
+                    ui.ctx().set_cursor_icon(crop::cursor_for(h));
+                }
+            }
+        }
+        if let Some(h) = self.crop_drag {
+            ui.ctx().set_cursor_icon(crop::cursor_for(h));
+        }
+
+        let canvas_crop = crop::to_canvas(rect, self.src_w, self.src_h, self.crop_rect.unwrap_or(crop_r));
+        crop::draw(ui.painter(), rect, canvas_crop, C_IN);
     }
 
     fn ui_timeline(&mut self, ui: &mut egui::Ui) {
@@ -747,8 +809,17 @@ impl CutvApp {
                 if cbtn(ui, "GIF", TXT_DIM).clicked() { self.do_gif(); }
 
                 ui.add_space(4.0);
-                let crop_fg = if self.crop_mode { TXT } else { TXT_DIM };
-                if cbtn(ui, "⬚ CROP", crop_fg).clicked() { self.toggle_crop_mode(); }
+                let crop_fg = if self.crop_mode {
+                    TXT
+                } else if self.crop_rect.is_some() {
+                    C_IN // crop is set and will apply to CUT, just not being edited right now
+                } else {
+                    TXT_DIM
+                };
+                let crop_resp = cbtn(ui, "⬚ CROP", crop_fg)
+                    .on_hover_text("Click: toggle crop editing · Right-click: clear crop");
+                if crop_resp.clicked() { self.toggle_crop_mode(); }
+                if crop_resp.secondary_clicked() { self.clear_crop(); }
             });
         });
     }
