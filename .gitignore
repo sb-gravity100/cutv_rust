@@ -9,3 +9,6 @@ sample_60fps.mp4
 
 # do_gif() output — <stem>_gif_<timestamp>.gif, ephemeral test artifacts
 *_gif_*.gif
+
+# scratch log redirected from manual `cargo run` testing sessions
+run_log.txt
