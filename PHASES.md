@@ -61,10 +61,12 @@ Playback was fast; seeking still wasn't ("takes maybe 500ms+", "+1/-1 frame does
 - [x] Confirmed working end-to-end by the user against both `sample_60fps.mp4` (long-GOP test case) and the usual `sample.mp4`.
 - [x] Update `FILE_INDEX.md`, `PLAN.md`, `commits.md`.
 
-## Phase 2 — cut progress bar
+## Phase 2 — cut progress bar (DONE 2026-09-19)
 
-- [ ] Convert `do_cut`'s ffmpeg export call from blocking `.output()` to `Stdio::piped()` with a stdout line reader parsing `out_time_ms=`, draining stderr in parallel.
-- [ ] Add progress state to `CutvApp`, thin `Rect` fill in the status bar.
+- [x] Convert `do_cut`'s ffmpeg export call from blocking `.output()` to `Stdio::piped()` with a stdout line reader parsing `out_time_us=`/`out_time_ms=`, draining stderr in parallel on its own thread to avoid a pipe deadlock.
+- [x] Progress state (`cut_progress_shared: Arc<Mutex<f32>>`, synced into `CutvApp::cut_progress` each frame) drives the existing thin `Rect` fill in the status bar (`ui_progress`, already wired — it just never had anything but 0.0 writing to it before).
+- [x] **Bug found and fixed along the way:** `do_cut`'s output path was landing at the filesystem root instead of the source's directory for a bare relative filename (`Path::parent()` returns `Some("")`, not `None`, for a path with no directory component — the old `unwrap_or(".")` fallback never triggered). Fixed via `PathBuf::join` instead of manual string formatting.
+- [x] Confirmed working by the user.
 
 ## Phase 3 — crop tool
 

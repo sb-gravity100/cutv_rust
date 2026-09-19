@@ -2,6 +2,12 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `23c63c7` · 2026-09-19 · feat: parse ffmpeg -progress output for a live cut progress bar
+- `src/app.rs`
+
+### `07928bf` · 2026-09-19 · fix: cut output saved to filesystem root instead of source's directory
+- `src/app.rs`
+
 ### `06f12ea` · 2026-09-19 · feat: add short-GOP scrub proxy for fast, frame-exact seeking
 - `src/app.rs`
 - `src/main.rs`
