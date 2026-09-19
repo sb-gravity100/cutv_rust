@@ -6,3 +6,6 @@ sample_60fps.mp4
 
 # do_cut() output — <stem>_cut_<timestamp>.<ext>, ephemeral test artifacts
 *_cut_*.mp4
+
+# do_gif() output — <stem>_gif_<timestamp>.gif, ephemeral test artifacts
+*_gif_*.gif

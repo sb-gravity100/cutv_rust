@@ -23,6 +23,7 @@ raw-window-handle = "0.6"
 gstreamer = "0.25.3"
 gstreamer-app = "0.25.2"
 gstreamer-video = "0.25.3"
+gifski = { version = "1.34.0", default-features = false }
 
 [profile.release]
 opt-level       = 3

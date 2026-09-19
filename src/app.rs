@@ -11,6 +11,7 @@ use egui::{
 use log::{debug, trace};
 
 use crate::crop::{self, CropRect, Handle as CropHandle};
+use crate::gif::{self, GifOutcome};
 use crate::player::Player;
 use crate::probe::encode_args;
 use crate::proxy::spawn_proxy;
@@ -99,8 +100,9 @@ pub struct CutvApp {
 
     status:       String,
     cut_progress: f32,
-    cut_progress_shared: Arc<Mutex<f32>>, // written by do_cut()'s worker thread as ffmpeg reports it
+    cut_progress_shared: Arc<Mutex<f32>>, // written by do_cut()/do_gif()'s worker thread as export progresses
     cut_result:   Arc<Mutex<Option<CutResult>>>,
+    gif_result:   Arc<Mutex<Option<GifOutcome>>>,
 }
 
 impl CutvApp {
@@ -145,10 +147,11 @@ impl CutvApp {
             crop_drag: None,
             frame_hold_dir: 0,
             next_hold_tick: 0.0,
-            status: "Space play  ←→ ±5s  ,. ±1f  I/O in/out  M mute  Enter cut".into(),
+            status: "Space play  ←→ ±5s  ,. ±1f  I/O in/out  M mute  Enter cut  G gif".into(),
             cut_progress: 0.0,
             cut_progress_shared: Arc::new(Mutex::new(0.0)),
             cut_result: Arc::new(Mutex::new(None)),
+            gif_result: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -245,9 +248,31 @@ impl CutvApp {
         self.status = "crop cleared".into();
     }
 
-    // TODO(Phase 4): real two-pass palette GIF export.
     fn do_gif(&mut self) {
-        self.status = "GIF export not implemented yet".into();
+        if self.out_t - self.in_t < 0.1 {
+            self.status = "IN/OUT too close (< 0.1 s)".into();
+            return;
+        }
+        if !self.player.paused { self.player.pause(); }
+
+        let p      = Path::new(&self.path);
+        let stem   = p.file_stem().unwrap_or_default().to_string_lossy();
+        let ts_str = Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let out_path = dir.join(format!("{stem}_gif_{ts_str}.gif"))
+            .to_string_lossy().to_string();
+
+        debug!("gif  [{:.3} → {:.3}]  -> {out_path}", self.in_t, self.out_t);
+        self.status = format!("Exporting GIF → {}", Path::new(&out_path).file_name()
+            .unwrap_or_default().to_string_lossy());
+        *self.cut_progress_shared.lock().unwrap() = 0.0;
+
+        gif::spawn_gif_export(
+            self.path.clone(), self.in_t, self.out_t,
+            self.src_w, self.src_h, self.crop_rect,
+            out_path, self.cut_progress_shared.clone(),
+            self.gif_result.clone(), self.ctx.clone(),
+        );
     }
 
     fn do_cut(&mut self) {
@@ -475,12 +500,22 @@ impl eframe::App for CutvApp {
                 *self.cut_progress_shared.lock().unwrap() = 0.0;
             }
         }
+        if let Ok(mut g) = self.gif_result.lock() {
+            if let Some(r) = g.take() {
+                self.status = match r {
+                    GifOutcome::Done(n)  => format!("Saved: {n}"),
+                    GifOutcome::Err(msg) => format!("Error: {}", &msg[..msg.len().min(80)]),
+                };
+                self.cut_progress = 0.0;
+                *self.cut_progress_shared.lock().unwrap() = 0.0;
+            }
+        }
 
         // ── Keyboard input ────────────────────────────────────────────────────
         // Comma/period use key_down (held, sampled every frame) instead of
         // key_pressed (fires once on the down-edge) so they can drive the
         // same hold-to-repeat cadence as the on-screen 1f buttons below.
-        let (kspace, kleft, kright, kcomma_down, kperiod_down, ki, ko, km, kenter) =
+        let (kspace, kleft, kright, kcomma_down, kperiod_down, ki, ko, km, kenter, kg) =
             ctx.input(|i| (
                 i.key_pressed(egui::Key::Space),
                 i.key_pressed(egui::Key::ArrowLeft),
@@ -491,6 +526,7 @@ impl eframe::App for CutvApp {
                 i.key_pressed(egui::Key::O),
                 i.key_pressed(egui::Key::M),
                 i.key_pressed(egui::Key::Enter),
+                i.key_pressed(egui::Key::G),
             ));
         if kspace  { self.toggle_play(); }
         if kleft   { let t = self.cur_t - 5.0; self.seek(t); }
@@ -499,6 +535,7 @@ impl eframe::App for CutvApp {
         if ko      { self.set_out(); }
         if km      { self.toggle_mute(); }
         if kenter  { self.do_cut(); }
+        if kg      { self.do_gif(); }
 
         let kb_hold_dir = match (kcomma_down, kperiod_down) {
             (true, false) => -1,
