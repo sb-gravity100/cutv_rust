@@ -36,6 +36,18 @@ pub struct Player {
     pub position: f64,
     pub paused: bool,
     fps: f64,
+
+    // True from the moment seek() is called until the next frame actually
+    // arrives via poll(). seek() (SeekFlags::ACCURATE) always decodes
+    // forward from the keyframe before the target to land exactly on it —
+    // cheap on the short-GOP scrub proxy (proxy.rs) this app plays back
+    // through, but never instantaneous. Without this gate, a rapid burst
+    // of seeks (held frame-stepping, or a fast timeline drag) each
+    // interrupt the previous one before it can land, so nothing ever
+    // completes. See app.rs's service_frame_hold and ui_timeline, both of
+    // which check this before issuing another seek.
+    seeking: bool,
+    seek_issued_at: Option<std::time::Instant>, // for logging real seek->frame latency
 }
 
 impl Player {
@@ -99,9 +111,21 @@ impl Player {
         if let Err(e) = pipeline.set_state(gst::State::Paused) {
             warn!("playbin set_state(Paused) failed: {e}");
         }
+        // Block until the pipeline actually finishes prerolling (reaches
+        // PAUSED) — set_state() alone returns as soon as the change is
+        // accepted, often well before preroll completes, and seeking before
+        // that point reliably fails ("Failed to seek"). Matters most when
+        // swapping Player over to the scrub proxy mid-playback (app.rs),
+        // where we need to seek to the resume position immediately after
+        // construction.
+        let (result, state, _pending) = pipeline.state(gst::ClockTime::from_seconds(5));
+        debug!("player: preroll wait -> {result:?}, state={state:?}");
 
         debug!("player ready (playbin)");
-        Player { pipeline, appsink, duration, position: 0.0, paused: true, fps: fps.max(1.0) }
+        Player {
+            pipeline, appsink, duration, position: 0.0, paused: true,
+            fps: fps.max(1.0), seeking: false, seek_issued_at: None,
+        }
     }
 
     pub fn play(&mut self) {
@@ -138,24 +162,19 @@ impl Player {
             pos,
         ) {
             warn!("seek({t:.3}) failed: {e}");
+        } else {
+            self.seeking = true;
+            self.seek_issued_at = Some(std::time::Instant::now());
         }
         debug!("seek({t:.3}): seek_simple returned in {:?}", t0.elapsed());
         self.position = t;
     }
 
-    /// Snaps to the nearest keyframe — no decode-to-target cost, so it's
-    /// cheap regardless of GOP length. Used while continuously scrubbing;
-    /// the UI follows up with one `seek()` once the drag settles.
-    pub fn seek_fast(&mut self, t: f64) {
-        let t = t.clamp(0.0, self.duration);
-        let pos = gst::ClockTime::from_nseconds((t * 1_000_000_000.0) as u64);
-        if let Err(e) = self.pipeline.seek_simple(
-            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-            pos,
-        ) {
-            warn!("seek_fast({t:.3}) failed: {e}");
-        }
-        self.position = t;
+    /// True while a seek issued via `seek()` hasn't yet produced a new
+    /// frame. See the `seeking` field doc for why this matters for held
+    /// frame-stepping and dragging the timeline.
+    pub fn is_seeking(&self) -> bool {
+        self.seeking
     }
 
     /// Only steps cleanly while paused. Implemented as a frame-exact seek
@@ -208,9 +227,19 @@ impl Player {
         let mut n = 0;
         loop {
             let t_one = std::time::Instant::now();
-            match self.appsink.try_pull_sample(gst::ClockTime::ZERO) {
+            // appsink delivers a frame two different ways depending on
+            // pipeline state: a PREROLL buffer while PAUSED (initial load,
+            // and every seek issued while paused — i.e. essentially all of
+            // scrubbing/stepping), or a regular SAMPLE while PLAYING.
+            // try_pull_sample() alone only ever catches the latter — we
+            // were missing every paused-state frame entirely (frame 0 never
+            // rendering on load, and the display looking frozen after any
+            // seek while paused, were both this).
+            let pulled = self.appsink.try_pull_preroll(gst::ClockTime::ZERO)
+                .or_else(|| self.appsink.try_pull_sample(gst::ClockTime::ZERO));
+            match pulled {
                 Some(sample) => {
-                    trace!("poll: try_pull_sample #{n} took {:?}", t_one.elapsed());
+                    trace!("poll: pulled #{n} took {:?}", t_one.elapsed());
                     let t_conv = std::time::Instant::now();
                     latest = sample_to_frame(&sample);
                     trace!("poll: sample_to_frame #{n} took {:?}", t_conv.elapsed());
@@ -222,6 +251,10 @@ impl Player {
         let dt_pull = t_pull.elapsed();
 
         if latest.is_some() {
+            self.seeking = false;
+            if let Some(issued) = self.seek_issued_at.take() {
+                debug!("seek->frame latency: {:?}", issued.elapsed());
+            }
             trace!(
                 "poll: TOTAL {:?}  (pos={dt_pos:?} dur={dt_dur:?} pull_loop={dt_pull:?} n_samples={n})",
                 t_poll.elapsed(),

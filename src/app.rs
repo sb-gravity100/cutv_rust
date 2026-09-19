@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -12,6 +12,7 @@ use log::{debug, trace};
 
 use crate::player::Player;
 use crate::probe::encode_args;
+use crate::proxy::spawn_proxy;
 use crate::thumbs::{ThumbData, spawn_thumbs};
 use crate::util::fmt_tc;
 
@@ -62,6 +63,14 @@ pub struct CutvApp {
     player: Player,
     video_tex: Option<egui::TextureHandle>,
 
+    // Scrub proxy (short-GOP transcode, see proxy.rs): `player` plays the
+    // original file until this resolves, then gets swapped to point at the
+    // proxy for fast accurate seeking. `proxy_active` guards against
+    // re-swapping every frame once it has; the temp file gets deleted on
+    // drop.
+    pending_proxy: Arc<Mutex<Option<PathBuf>>>,
+    proxy_active: Option<PathBuf>,
+
     // Measures decode throughput (frames actually delivered by Player::poll
     // per second), not the UI's own repaint rate — the useful number for
     // diagnosing "is the decoder keeping up" independent of egui's redraw
@@ -103,6 +112,7 @@ impl CutvApp {
 
         let pending_thumbs = spawn_thumbs(path.clone(), duration, ctx.clone());
         let player = Player::new(&path, duration, fps);
+        let pending_proxy = spawn_proxy(path.clone(), ctx.clone());
 
         CutvApp {
             ctx,
@@ -114,6 +124,8 @@ impl CutvApp {
             transport_w: 280.0,
             player,
             video_tex: None,
+            pending_proxy,
+            proxy_active: None,
             frames_this_sec: 0,
             fps_window_start: 0.0,
             measured_fps: 0.0,
@@ -145,15 +157,6 @@ impl CutvApp {
         self.cur_t = t; // optimistic; corrected by the next poll() if the decoder lands elsewhere
     }
 
-    /// Cheap keyframe-snap seek for while the timeline is actively being
-    /// dragged — see Player::seek_fast. Follow up with seek() once the drag
-    /// settles to land exactly on the intended frame.
-    fn seek_fast(&mut self, t: f64) {
-        let t = t.clamp(0.0, self.duration);
-        self.player.seek_fast(t);
-        self.cur_t = t;
-    }
-
     fn step_frames(&mut self, n: i32) {
         self.player.step_frames(n);
     }
@@ -167,16 +170,21 @@ impl CutvApp {
             self.frame_hold_dir = 0;
             return;
         }
+        // step_frames() is a frame-exact seek, which can take real time on a
+        // long-GOP source (measured: 500ms+ for a ~250-frame GOP — it has to
+        // decode forward from the keyframe to the exact target). This gate
+        // applies to EVERY step, not just held repeats: a fresh press (the
+        // `frame_hold_dir != dir` branch) used to bypass it entirely, so
+        // pressing again before the previous step's seek landed thrashed
+        // exactly the same way holding did — nothing ever completed.
+        if self.player.is_seeking() {
+            return;
+        }
         if self.frame_hold_dir != dir {
             self.frame_hold_dir = dir;
             self.step_frames(dir);
             self.next_hold_tick = now + 0.35; // initial delay before repeat kicks in
         } else if now >= self.next_hold_tick {
-            // The decode thread itself coalesces a backlog of rapid
-            // same-kind commands now (see video.rs's CmdSource), so unlike
-            // the old mpv-based player there's no need to throttle here to
-            // avoid a "catches up after release" lag — just keep issuing
-            // steps at a cadence scaled to the source frame rate.
             self.step_frames(dir);
             let interval = (2.5 / self.fps.max(1.0)).max(0.03);
             self.next_hold_tick = now + interval;
@@ -311,6 +319,27 @@ impl eframe::App for CutvApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let t_update_start = std::time::Instant::now();
 
+        // ── Swap to the scrub proxy once it's ready ───────────────────────────
+        // do_cut() always uses self.path (the original) regardless — only
+        // playback switches. Preserves position/play state across the swap.
+        if self.proxy_active.is_none() {
+            if let Some(proxy_path) = self.pending_proxy.lock().unwrap().take() {
+                debug!("swapping playback to scrub proxy: {proxy_path:?}");
+                let was_playing = !self.player.paused;
+                let resume_at = self.player.position;
+                let mut new_player = Player::new(&proxy_path.to_string_lossy(), self.duration, self.fps);
+                new_player.seek(resume_at);
+                if was_playing {
+                    new_player.play();
+                }
+                new_player.set_mute(self.muted);
+                self.player = new_player;
+                self.video_tex = None; // old texture's size may not match; reload on next frame
+                self.status = "Scrub proxy ready — seeking is now fast".into();
+                self.proxy_active = Some(proxy_path);
+            }
+        }
+
         // ── Poll player state ─────────────────────────────────────────────────
         if let Some(f) = self.player.poll() {
             let t0 = std::time::Instant::now();
@@ -426,6 +455,16 @@ impl eframe::App for CutvApp {
     }
 }
 
+impl Drop for CutvApp {
+    fn drop(&mut self) {
+        if let Some(p) = &self.proxy_active {
+            if let Err(e) = std::fs::remove_file(p) {
+                debug!("failed to remove scrub proxy temp file {p:?}: {e}");
+            }
+        }
+    }
+}
+
 // ── UI sections ───────────────────────────────────────────────────────────────
 
 impl CutvApp {
@@ -480,12 +519,30 @@ impl CutvApp {
                 match self.tl_drag {
                     Some(Drag::In)  => { self.in_t  = t.clamp(0.0, self.out_t); }
                     Some(Drag::Out) => { self.out_t = t.clamp(self.in_t, self.duration); }
-                    // Fast (keyframe-snap) seek while actively dragging —
-                    // an exact decode-to-target seek here would cost real
-                    // decode time on every dragged pointer move and make
-                    // scrubbing feel like it's hanging. Landed on exactly
-                    // once the drag settles, just below.
-                    _               => { self.seek_fast(t.clamp(0.0, self.duration)); }
+                    _ => {
+                        // The playhead line follows the pointer immediately
+                        // every dragged frame (cheap, always smooth), but
+                        // the actual decoded frame only updates once the
+                        // previous seek has landed — a fast mouse drag can
+                        // generate far more pointer-move events per second
+                        // than even a fast (short-GOP scrub proxy) exact
+                        // seek can complete, and issuing one on every
+                        // single frame just interrupts the previous one
+                        // before it lands (measured: 11+ seeks/sec during a
+                        // drag, only 1 ever actually completed). This
+                        // naturally chases the latest position once the
+                        // decoder is free, same idea as
+                        // service_frame_hold's gate. Always exact — the
+                        // scrub proxy's short GOP (proxy.rs) makes an exact
+                        // seek about as cheap as a keyframe-snap one would
+                        // have been, so there's no accuracy/speed tradeoff
+                        // left to make here.
+                        let t = t.clamp(0.0, self.duration);
+                        self.cur_t = t;
+                        if !self.player.is_seeking() {
+                            self.player.seek(t);
+                        }
+                    }
                 }
             }
         } else if resp.drag_stopped() && matches!(self.tl_drag, None | Some(Drag::Pos)) {

@@ -1,6 +1,7 @@
 mod app;
 mod player;
 mod probe;
+mod proxy;
 mod thumbs;
 mod util;
 
