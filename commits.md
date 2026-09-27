@@ -2,6 +2,20 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `a7a68a7` · 2026-09-27 · docs: sync planning docs for Phase 10 (probe/proxy/thumbs/gif via ffmpeg-next)
+- `FILE_INDEX.md`
+- `PHASES.md`
+- `PLAN.md`
+
+### `0b81821` · 2026-09-27 · feat: probe/proxy/thumbs/gif via ffmpeg-next, in-process (Phase 10)
+- `Cargo.toml`
+- `Cargo.lock`
+- `src/probe.rs`
+- `src/proxy.rs`
+- `src/thumbs.rs`
+- `src/gif.rs`
+- `src/util.rs`
+
 ### `cce4789` · 2026-09-27 · docs: sync planning docs for Phase 8 (variable speed) and Phase 9 (ffmpeg-next export)
 - `FILE_INDEX.md`
 - `PHASES.md`
