@@ -2,6 +2,14 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `31f71a6` · 2026-09-27 · docs: sync planning docs for Phase 11 (GIF as default export)
+- `FILE_INDEX.md`
+- `PHASES.md`
+- `PLAN.md`
+
+### `b3f2a8c` · 2026-09-27 · feat: make GIF the default export, video cut secondary (Phase 11)
+- `src/app.rs`
+
 ### `a7a68a7` · 2026-09-27 · docs: sync planning docs for Phase 10 (probe/proxy/thumbs/gif via ffmpeg-next)
 - `FILE_INDEX.md`
 - `PHASES.md`
