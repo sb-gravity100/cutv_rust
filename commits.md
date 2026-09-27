@@ -2,6 +2,9 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `74e2159` · 2026-09-27 · feat: append debug logs to cutv.log next to the exe
+- `src/main.rs`
+
 ### `396745b` · 2026-09-19 · feat: content-hash proxy naming + exit-time proxy cleanup
 - `src/proxy.rs`
 - `src/app.rs`
