@@ -3,7 +3,9 @@
 // launches with no existing console to attach to — running via `cargo run`
 // or `cutv.bat` from an already-open terminal still inherits that
 // terminal's stdout/stderr, so `debug!`/`RUST_LOG` logging is unaffected
-// there (and still works redirected to a file either way).
+// there. Either way, logs are also always appended to `cutv.log` next to
+// the .exe, so a standalone launch (no console to read) can still be
+// debugged after the fact.
 #![windows_subsystem = "windows"]
 
 mod app;
@@ -17,14 +19,63 @@ mod util;
 
 use anyhow::{bail, ensure, Result};
 use log::debug;
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
-fn main() -> Result<()> {
+/// Writes every log line to both stderr (if a console is attached) and the
+/// log file; a failed stderr write (no console) is ignored.
+struct Tee(std::fs::File);
+
+impl Write for Tee {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = std::io::stderr().write_all(buf);
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::stderr().flush();
+        self.0.flush()
+    }
+}
+
+/// Sets up env_logger and appends to `cutv.log` next to the .exe.
+/// Returns the log path if the file could be opened; always initializes
+/// stderr-only logging as a fallback if it couldn't.
+fn init_logging() -> Option<PathBuf> {
+    let log_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("cutv.log")));
+
+    let file = log_path
+        .as_ref()
+        .and_then(|p| OpenOptions::new().create(true).append(true).open(p).ok());
+
     // Default to DEBUG so all log::debug! calls are visible.
     // Override with RUST_LOG=info for quieter output.
-    env_logger::Builder::from_env(
+    let mut builder = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("debug"),
-    ).init();
+    );
+
+    match file {
+        Some(mut f) => {
+            let _ = writeln!(
+                f,
+                "\n===== session start {} =====",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            );
+            builder.target(env_logger::Target::Pipe(Box::new(Tee(f))));
+            builder.init();
+            log_path
+        }
+        None => {
+            builder.init();
+            None
+        }
+    }
+}
+
+fn main() -> Result<()> {
+    let log_path = init_logging();
 
     let path = resolve_path()?;
     let info = probe::probe_video(&path)?;
@@ -43,6 +94,9 @@ fn main() -> Result<()> {
 
     debug!("opening: {filename}  src={}x{}  display={dw}x{dh}",
         info.width, info.height);
+    if let Some(p) = &log_path {
+        debug!("logging to {}", p.display());
+    }
 
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png"))
         .expect("bundled icon-256.png should always decode");
