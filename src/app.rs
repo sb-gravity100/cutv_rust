@@ -332,7 +332,7 @@ impl CutvApp {
         self.status = if self.crop_mode {
             "Crop: drag handles to resize, drag inside to move".into()
         } else {
-            "crop mode off — crop still applies to CUT until cleared".into()
+            "crop mode off — crop still applies to GIF/MP4 export until cleared".into()
         };
     }
 
@@ -558,7 +558,7 @@ impl eframe::App for CutvApp {
         // Comma/period use key_down (held, sampled every frame) instead of
         // key_pressed (fires once on the down-edge) so they can drive the
         // same hold-to-repeat cadence as the on-screen 1f buttons below.
-        let (kspace, kleft, kright, kcomma_down, kperiod_down, ki, ko, km, kenter, kg) =
+        let (kspace, kleft, kright, kcomma_down, kperiod_down, ki, ko, km, kenter, kg, kv) =
             ctx.input(|i| (
                 i.key_pressed(egui::Key::Space),
                 i.key_pressed(egui::Key::ArrowLeft),
@@ -570,6 +570,7 @@ impl eframe::App for CutvApp {
                 i.key_pressed(egui::Key::M),
                 i.key_pressed(egui::Key::Enter),
                 i.key_pressed(egui::Key::G),
+                i.key_pressed(egui::Key::V),
             ));
         if kspace  { self.toggle_play(); }
         if kleft   { let t = self.cur_t - 5.0; self.seek(t); }
@@ -577,8 +578,11 @@ impl eframe::App for CutvApp {
         if ki      { self.set_in(); }
         if ko      { self.set_out(); }
         if km      { self.toggle_mute(); }
-        if kenter  { self.do_cut(); }
+        // GIF is the default export (Enter and G both trigger it); video
+        // cut is the secondary action, bound to V.
+        if kenter  { self.do_gif(); }
         if kg      { self.do_gif(); }
+        if kv      { self.do_cut(); }
 
         let kb_hold_dir = match (kcomma_down, kperiod_down) {
             (true, false) => -1,
@@ -886,19 +890,19 @@ impl CutvApp {
             ui.add_space(2.0);
             if cbtn(ui, "To End ▶",       TXT_DIM)  .clicked() { self.cut_to_end(); }
 
-            // Push mute + CUT to the right
+            // Push mute + GIF to the right
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(10.0);
-                // CUT button (light bg)
+                // GIF button (light bg) — the default export
                 if ui.add(egui::Button::new(
-                        RichText::new("✂  CUT")
+                        RichText::new("✂  GIF")
                             .color(Color32::from_rgb(0x11, 0x11, 0x11))
                             .size(13.0).strong())
                     .fill(Color32::from_rgb(0xee, 0xee, 0xee))
                     .stroke(Stroke::NONE)
                     .min_size(vec2(74.0, 34.0)))
                     .clicked()
-                { self.do_cut(); }
+                { self.do_gif(); }
 
                 ui.add_space(4.0);
                 let speed_lbl = format!("{}×", fmt_speed(self.speed));
@@ -942,13 +946,13 @@ impl CutvApp {
                 if cbtn(ui, mute_lbl, mute_fg).clicked() { self.toggle_mute(); }
 
                 ui.add_space(4.0);
-                if cbtn(ui, "GIF", TXT_DIM).clicked() { self.do_gif(); }
+                if cbtn(ui, "MP4", TXT_DIM).on_hover_text("Cut to source video format").clicked() { self.do_cut(); }
 
                 ui.add_space(4.0);
                 let crop_fg = if self.crop_mode {
                     TXT
                 } else if self.crop_rect.is_some() {
-                    C_IN // crop is set and will apply to CUT, just not being edited right now
+                    C_IN // crop is set and will apply to export, just not being edited right now
                 } else {
                     TXT_DIM
                 };
