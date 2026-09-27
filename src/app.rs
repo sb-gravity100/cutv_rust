@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -13,7 +12,6 @@ use log::{debug, trace};
 use crate::crop::{self, CropRect, Handle as CropHandle};
 use crate::gif::{self, GifOutcome};
 use crate::player::Player;
-use crate::probe::{atempo_chain, audio_sample_rate, encode_args, has_audio_stream};
 use crate::proxy::spawn_proxy;
 use crate::thumbs::{ThumbData, spawn_thumbs};
 use crate::util::{fmt_speed, fmt_tc};
@@ -402,10 +400,6 @@ impl CutvApp {
         let out_t      = self.out_t;
         let speed      = self.speed;
         let keep_pitch = self.keep_pitch;
-        // out_time_us below tracks the *output* timeline, which setpts
-        // (applied below when speed != 1) stretches/compresses relative to
-        // the source segment — divide so the progress bar still lands at 1.0.
-        let cut_dur    = (out_t - in_t).max(0.001) / speed;
         let crop_rect  = self.crop_rect;
         let cut_result = self.cut_result.clone();
         let cut_progress = self.cut_progress_shared.clone();
@@ -413,120 +407,33 @@ impl CutvApp {
         *cut_progress.lock().unwrap() = 0.0;
 
         thread::spawn(move || {
-            let enc = encode_args(&path);
-            let has_audio = has_audio_stream(&path);
-            let src_sample_rate = audio_sample_rate(&path);
-            // -t as an INPUT option (before -i) bounds how much source is
-            // read; as an output option (after -i) it bounds the encoded
-            // OUTPUT's duration instead — which silently breaks with a
-            // setpts speed change, since ffmpeg would then read MORE (or
-            // less) than this segment to fill that output duration.
-            let mut args = vec![
-                "-y".to_string(),
-                "-ss".to_string(), format!("{in_t:.3}"),
-                "-t".to_string(), format!("{:.3}", out_t - in_t),
-                "-i".to_string(), path,
-            ];
-            args.extend(enc);
-            let speed_changed = (speed - 1.0).abs() > 1e-6;
-            let mut vf = Vec::new();
-            if let Some(r) = crop_rect {
-                vf.push(r.to_vf());
-            }
-            if speed_changed {
-                vf.push(format!("setpts={:.6}*PTS", 1.0 / speed));
-            }
-            if !vf.is_empty() {
-                args.push("-vf".to_string());
-                args.push(vf.join(","));
-            }
-            if speed_changed && has_audio {
-                // Keep pitch: atempo's WSOLA time-stretch changes tempo only.
-                // Let pitch shift: asetrate scales the sample rate by speed
-                // (tape/vinyl-style), then aresample restores the container's
-                // original rate so the encoder/muxer see a consistent format.
-                let af = if keep_pitch {
-                    atempo_chain(speed)
-                } else {
-                    let sr = src_sample_rate.unwrap_or(44100);
-                    let new_sr = ((sr as f64 * speed).round().max(1.0)) as u32;
-                    format!("asetrate={new_sr},aresample={sr}")
-                };
-                args.push("-af".to_string());
-                args.push(af);
-            }
-            // Machine-readable progress on stdout, one `key=value` per
-            // line, ending each stanza with `progress=continue`/`end` —
-            // parsed below to drive the status-bar progress fill.
-            args.push("-progress".to_string());
-            args.push("pipe:1".to_string());
-            args.push(out_path.clone());
+            debug!(
+                "ffmpeg-next cut: {path} [{in_t:.3} → {out_t:.3}] crop={crop_rect:?} \
+                 speed={speed} keep_pitch={keep_pitch} -> {out_path}"
+            );
 
-            debug!("ffmpeg cut: {}", args.join(" "));
-            let mut cmd = Command::new("ffmpeg");
-            cmd.args(&args)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            #[cfg(target_os = "windows")]
-            { use std::os::windows::process::CommandExt; cmd.creation_flags(0x08000000); }
+            let progress_ctx = ctx.clone();
+            let progress_shared = cut_progress.clone();
+            let result = crate::export::cut_video(
+                &path, &out_path, in_t, out_t, crop_rect, speed, keep_pitch,
+                move |frac| {
+                    *progress_shared.lock().unwrap() = frac;
+                    progress_ctx.request_repaint();
+                },
+            );
 
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    log::warn!("cut exec error: {e}");
-                    *cut_result.lock().unwrap() = Some(CutResult::Err(e.to_string()));
-                    ctx.request_repaint();
-                    return;
-                }
-            };
-
-            // stderr has to be drained concurrently with stdout, or ffmpeg
-            // blocks writing to one full pipe while we're blocked reading
-            // the other — a classic pipe deadlock. Collect it on its own
-            // thread; only used for the error message if the cut fails.
-            let stderr = child.stderr.take().expect("stderr was piped");
-            let stderr_thread = thread::spawn(move || -> String {
-                use std::io::Read;
-                let mut buf = String::new();
-                let _ = std::io::BufReader::new(stderr).read_to_string(&mut buf);
-                buf
-            });
-
-            if let Some(stdout) = child.stdout.take() {
-                use std::io::BufRead;
-                for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
-                    // out_time_us (or the older out_time_ms, also actually
-                    // microseconds despite the name — a long-standing
-                    // ffmpeg quirk kept for backward compatibility) is the
-                    // encoder's current position into the cut.
-                    if let Some(v) = line.strip_prefix("out_time_us=")
-                        .or_else(|| line.strip_prefix("out_time_ms=")) {
-                        if let Ok(us) = v.parse::<f64>() {
-                            let frac = ((us / 1_000_000.0) / cut_dur).clamp(0.0, 1.0) as f32;
-                            *cut_progress.lock().unwrap() = frac;
-                            ctx.request_repaint();
-                        }
-                    }
-                }
-            }
-
-            let status = child.wait();
-            let stderr_text = stderr_thread.join().unwrap_or_default();
-
-            let result = match status {
-                Ok(s) if s.success() => {
+            let result = match result {
+                Ok(()) => {
                     let name = Path::new(&out_path)
                         .file_name().unwrap_or_default()
                         .to_string_lossy().to_string();
                     debug!("cut done: {name}");
-                    *cut_progress.lock().unwrap() = 1.0;
                     CutResult::Done(name)
                 }
-                Ok(s) => {
-                    log::warn!("cut failed (exit {s}): {stderr_text}");
-                    CutResult::Err(stderr_text)
+                Err(e) => {
+                    log::warn!("cut failed: {e:#}");
+                    CutResult::Err(format!("{e:#}"))
                 }
-                Err(e) => { log::warn!("cut wait error: {e}"); CutResult::Err(e.to_string()) }
             };
             *cut_result.lock().unwrap() = Some(result);
             ctx.request_repaint();

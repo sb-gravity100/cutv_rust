@@ -10,6 +10,7 @@
 
 mod app;
 mod crop;
+mod export;
 mod gif;
 mod player;
 mod probe;
