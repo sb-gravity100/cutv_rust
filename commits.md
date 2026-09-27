@@ -2,6 +2,26 @@
 
 Commit log — prepend a new entry after every commit.
 
+### `cce4789` · 2026-09-27 · docs: sync planning docs for Phase 8 (variable speed) and Phase 9 (ffmpeg-next export)
+- `FILE_INDEX.md`
+- `PHASES.md`
+- `PLAN.md`
+
+### `60e49b8` · 2026-09-27 · feat: in-process do_cut export via ffmpeg-next (Phase 9)
+- `Cargo.toml`
+- `Cargo.lock`
+- `src/main.rs`
+- `src/export.rs`
+- `src/app.rs`
+- `src/probe.rs`
+
+### `fa65263` · 2026-09-27 · feat: variable playback/export speed (Phase 8)
+- `src/app.rs`
+- `src/gif.rs`
+- `src/player.rs`
+- `src/probe.rs`
+- `src/util.rs`
+
 ### `74e2159` · 2026-09-27 · feat: append debug logs to cutv.log next to the exe
 - `src/main.rs`
 
