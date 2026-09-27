@@ -88,15 +88,28 @@ impl Player {
         // auto-wins decodebin's element-ranking). Falls back to plain
         // `videoconvert` on a machine with no D3D11 device — a solid
         // fallback now, not just "won't hang", now that ORC is enabled.
+        //
+        // max-buffers=1 drop=true caps the appsink's internal queue at one
+        // frame and discards overflow instead of queuing it (default is
+        // unlimited) — poll()'s doc comment already assumed this ("appsink
+        // drops old ones for us"), but nothing actually enforced it. At 1x
+        // playback, push and poll() cadence stayed close enough that the
+        // gap never showed; Player::set_speed() (rate > 1) pushes frames
+        // faster than poll() (once per UI frame) can necessarily drain, and
+        // on a large-resolution source each queued raw RGB frame is tens of
+        // MB — without this cap that backlog grows unbounded, which is
+        // what a high playback rate on a big file was observed to do.
         let video_sink_bin = gst::parse::bin_from_description(
             "d3d11upload ! d3d11convert ! video/x-raw(memory:D3D11Memory),format=RGB ! \
-             d3d11download ! appsink name=cutv_sink caps=video/x-raw,format=RGB sync=true",
+             d3d11download ! appsink name=cutv_sink caps=video/x-raw,format=RGB sync=true \
+             max-buffers=1 drop=true",
             true,
         )
         .or_else(|e| {
             warn!("D3D11 video sink unavailable ({e}), falling back to CPU videoconvert");
             gst::parse::bin_from_description(
-                "videoconvert ! appsink name=cutv_sink caps=video/x-raw,format=RGB sync=true",
+                "videoconvert ! appsink name=cutv_sink caps=video/x-raw,format=RGB sync=true \
+                 max-buffers=1 drop=true",
                 true,
             )
         })
@@ -191,6 +204,73 @@ impl Player {
 
     pub fn set_mute(&mut self, m: bool) {
         self.pipeline.set_property("mute", m);
+    }
+
+    /// Changes playback rate in place, keeping the current position.
+    /// playbin has no settable "rate" property — GStreamer only exposes
+    /// speed changes through a rate-seek (same mechanism `seek()` uses,
+    /// just with `rate` != 1.0 and `SeekType::Set`/`SeekType::End` instead
+    /// of an explicit stop position), so this costs the same
+    /// keyframe-forward-decode as a normal seek and goes through the same
+    /// `seeking` gate.
+    pub fn set_speed(&mut self, rate: f64) {
+        let rate = rate.clamp(0.1, 10.0);
+        let pos = gst::ClockTime::from_nseconds((self.position * 1_000_000_000.0) as u64);
+        debug!("set_speed({rate}) at pos={pos}");
+        if let Err(e) = self.pipeline.seek(
+            rate,
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+            gst::SeekType::Set,
+            pos,
+            gst::SeekType::End,
+            gst::ClockTime::ZERO,
+        ) {
+            warn!("set_speed({rate}) failed: {e}");
+            return;
+        }
+        self.seeking = true;
+        self.seek_issued_at = Some(std::time::Instant::now());
+    }
+
+    /// Toggles pitch-preserving time-stretch for preview audio. A rate-seek
+    /// alone (`set_speed`) resamples audio along with video — pitch shifts
+    /// with speed, tape/vinyl-style. playbin has no property for this
+    /// either; the fix is inserting `scaletempo` (WSOLA time-stretch, no
+    /// pitch shift) into the audio path via playbin's `audio-filter` slot,
+    /// vs. `identity` (no-op passthrough) when pitch should shift with speed.
+    pub fn set_keep_pitch(&mut self, keep: bool) {
+        let factory = if keep { "scaletempo" } else { "identity" };
+        let filter = match gst::ElementFactory::make(factory).build() {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("set_keep_pitch({keep}): failed to build '{factory}': {e}");
+                return;
+            }
+        };
+        // playbin only wires `audio-filter` into the pipeline when it builds
+        // its audio sink bin, which happens on the NULL/READY -> PAUSED
+        // transition — setting the property while already PAUSED/PLAYING
+        // (i.e. every call after the very first) is a silent no-op with no
+        // error. Drop to READY (tears down and re-links the sink bins, but
+        // keeps the loaded `uri`) to force a rebuild, then restore position
+        // and play state.
+        let was_playing = !self.paused;
+        let pos = self.position;
+        if let Err(e) = self.pipeline.set_state(gst::State::Ready) {
+            warn!("set_keep_pitch({keep}): set_state(Ready) failed: {e}");
+            return;
+        }
+        self.pipeline.set_property("audio-filter", &filter);
+        if let Err(e) = self.pipeline.set_state(gst::State::Paused) {
+            warn!("set_keep_pitch({keep}): set_state(Paused) failed: {e}");
+            return;
+        }
+        let (result, state, _) = self.pipeline.state(gst::ClockTime::from_seconds(5));
+        debug!("set_keep_pitch({keep}) -> audio-filter={factory}, reconfigure -> {result:?}, state={state:?}");
+        self.seek(pos);
+        if was_playing {
+            self.play();
+        }
     }
 
     /// Refresh position/duration and return the most recent decoded frame

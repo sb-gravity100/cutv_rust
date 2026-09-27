@@ -125,6 +125,49 @@ fn cpu_h26x_extra(br_kbps: Option<u64>) -> Vec<String> {
     v
 }
 
+/// Whether the source has an audio stream at all — do_cut's speed-change
+/// export needs this to decide whether an `-af atempo=...` filter is safe
+/// to add (ffmpeg errors if `-af` targets a stream that doesn't exist).
+pub fn has_audio_stream(path: &str) -> bool {
+    ffprobe(path)["streams"].as_array()
+        .is_some_and(|streams| streams.iter().any(|s| s["codec_type"].as_str() == Some("audio")))
+}
+
+/// ffmpeg's `atempo` filter only accepts a 0.5-2.0 rate per stage; chain
+/// multiple stages to cover this app's full speed range (0.1x-10x).
+pub fn atempo_chain(rate: f64) -> String {
+    let mut r = rate.max(0.01);
+    let mut stages = Vec::new();
+    while r > 2.0 { stages.push("atempo=2.0".to_string()); r /= 2.0; }
+    while r < 0.5 { stages.push("atempo=0.5".to_string()); r /= 0.5; }
+    stages.push(format!("atempo={r:.6}"));
+    stages.join(",")
+}
+
+/// Source audio stream's sample rate — used to build the `asetrate`/
+/// `aresample` pair for a speed change that lets pitch shift with speed
+/// (the "keep pitch" toggle off), rather than `atempo_chain`'s
+/// pitch-preserving stretch.
+pub fn audio_sample_rate(path: &str) -> Option<u32> {
+    ffprobe(path)["streams"].as_array()?
+        .iter()
+        .find(|s| s["codec_type"].as_str() == Some("audio"))
+        .and_then(|s| s["sample_rate"].as_str())
+        .and_then(|s| s.parse::<u32>().ok())
+}
+
+/// Normalized output audio codec for the given output container extension.
+/// Unlike video (which stays in the source's own codec family for a
+/// visually-lossless passthrough cut), audio is always re-encoded to one
+/// consistent codec regardless of the source's — so every export has
+/// predictable, broadly-compatible audio instead of inheriting whatever the
+/// source happened to use (mp3/opus/vorbis/ac3/pcm/alac/...). The one
+/// exception is `.webm`, whose container spec only accepts Vorbis or Opus
+/// (AAC won't mux into it at all), so that case normalizes to Opus instead.
+fn normalized_audio_codec(ext: &str) -> &'static str {
+    if ext.eq_ignore_ascii_case("webm") { "libopus" } else { "aac" }
+}
+
 pub fn encode_args(path: &str) -> Vec<String> {
     let info = ffprobe(path);
     let mut v: Vec<String> = vec![];
@@ -133,12 +176,9 @@ pub fn encode_args(path: &str) -> Vec<String> {
     // NVENC only covers h264/hevc; everything else falls through to a CPU
     // encoder even when NVENC is available (same as the external reference).
     let use_nvenc = nvenc_available();
-    let lossless = ["flac","pcm_s16le","pcm_s24le","pcm_s32le","pcm_f32le","alac"];
-    let a_map: &[(&str, &str)] = &[
-        ("aac","aac"), ("mp3","libmp3lame"), ("opus","libopus"), ("vorbis","libvorbis"),
-        ("flac","flac"), ("ac3","ac3"), ("eac3","eac3"),
-        ("pcm_s16le","pcm_s16le"), ("pcm_s24le","pcm_s24le"), ("alac","alac"),
-    ];
+    let a_enc = normalized_audio_codec(
+        std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or(""),
+    );
 
     if let Some(streams) = info["streams"].as_array() {
         for s in streams {
@@ -169,18 +209,13 @@ pub fn encode_args(path: &str) -> Vec<String> {
                 debug!("v_enc={enc}  pix_fmt={pfmt}  nvenc={use_nvenc}  src_bitrate={br:?}kbps");
             }
             if ct == "audio" && a.is_empty() {
-                let enc = a_map.iter().find(|(k,_)| *k == cn).map(|(_,v)| *v).unwrap_or("aac");
-                if lossless.contains(&cn) {
-                    a = ["-c:a", enc].iter().map(|s| s.to_string()).collect();
-                } else {
-                    let br = s["bit_rate"].as_str()
-                        .and_then(|b| b.parse::<u64>().ok())
-                        .map(|b| (b / 1000).max(64))
-                        .unwrap_or(192);
-                    a = ["-c:a", enc, "-b:a", &format!("{br}k")]
-                        .iter().map(|s| s.to_string()).collect();
-                }
-                debug!("a_enc={enc}");
+                let br = s["bit_rate"].as_str()
+                    .and_then(|b| b.parse::<u64>().ok())
+                    .map(|b| (b / 1000).max(64))
+                    .unwrap_or(192);
+                a = ["-c:a", a_enc, "-b:a", &format!("{br}k")]
+                    .iter().map(|s| s.to_string()).collect();
+                debug!("a_enc={a_enc} (normalized, src={cn})");
             }
         }
     }
@@ -199,7 +234,7 @@ pub fn encode_args(path: &str) -> Vec<String> {
             .collect();
     }
     if a.is_empty() {
-        a = ["-c:a","aac","-b:a","192k"].iter().map(|s| s.to_string()).collect();
+        a = ["-c:a", a_enc, "-b:a", "192k"].iter().map(|s| s.to_string()).collect();
     }
     v.extend(a);
     v

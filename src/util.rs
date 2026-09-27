@@ -10,6 +10,12 @@ pub fn fmt_tc(s: f64) -> String {
     )
 }
 
+/// Formats a playback/export speed multiplier for display, e.g. `1.0 ->
+/// "1"`, `1.5 -> "1.5"`, `0.25 -> "0.25"` — no trailing zeros.
+pub fn fmt_speed(s: f64) -> String {
+    if s.fract() == 0.0 { format!("{}", s as i64) } else { format!("{s}") }
+}
+
 pub fn parse_fps(s: &str) -> f64 {
     match s.split_once('/') {
         Some((n, d)) => {

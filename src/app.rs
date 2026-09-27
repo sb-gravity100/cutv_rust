@@ -13,10 +13,10 @@ use log::{debug, trace};
 use crate::crop::{self, CropRect, Handle as CropHandle};
 use crate::gif::{self, GifOutcome};
 use crate::player::Player;
-use crate::probe::encode_args;
+use crate::probe::{atempo_chain, audio_sample_rate, encode_args, has_audio_stream};
 use crate::proxy::spawn_proxy;
 use crate::thumbs::{ThumbData, spawn_thumbs};
-use crate::util::fmt_tc;
+use crate::util::{fmt_speed, fmt_tc};
 
 // ── Palette ───────────────────────────────────────────────────────────────────
 
@@ -87,6 +87,14 @@ pub struct CutvApp {
     in_t:    f64,
     out_t:   f64,
     muted:   bool,
+    // Playback rate AND the rate baked into do_cut()/do_gif()'s export
+    // filters (setpts/atempo) — one control for both, per explicit
+    // direction. Resets to 1.0 on a new video load, like in/out and crop.
+    speed:      f64,
+    // Whether speed changes preserve pitch (scaletempo/atempo, WSOLA
+    // time-stretch) or let it shift with speed, tape/vinyl-style
+    // (identity/asetrate). Resets to true (preserve) on a new video load.
+    keep_pitch: bool,
 
     thumb_texs:     Vec<(f64, egui::TextureHandle)>,
     pending_thumbs: Arc<Mutex<Vec<ThumbData>>>,
@@ -119,7 +127,8 @@ impl CutvApp {
         debug!("src {src_w}x{src_h}  fps={fps:.3}  dur={duration:.3}s");
 
         let pending_thumbs = spawn_thumbs(path.clone(), duration, ctx.clone());
-        let player = Player::new(&path, duration, fps);
+        let mut player = Player::new(&path, duration, fps);
+        player.set_keep_pitch(true);
         let pending_proxy = spawn_proxy(path.clone(), ctx.clone());
 
         CutvApp {
@@ -141,6 +150,8 @@ impl CutvApp {
             in_t: 0.0,
             out_t: duration,
             muted: false,
+            speed: 1.0,
+            keep_pitch: true,
             thumb_texs: Vec::new(),
             pending_thumbs,
             tl_drag: None,
@@ -231,6 +242,22 @@ impl CutvApp {
         self.player.set_mute(self.muted);
     }
 
+    fn set_speed(&mut self, s: f64) {
+        self.speed = s;
+        self.player.set_speed(s);
+        self.status = format!("Speed: {}×  (applies to preview and CUT/GIF export)", fmt_speed(s));
+    }
+
+    fn set_keep_pitch(&mut self, keep: bool) {
+        self.keep_pitch = keep;
+        self.player.set_keep_pitch(keep);
+        self.status = if keep {
+            "Keep pitch: on".into()
+        } else {
+            "Keep pitch: off — pitch will shift with speed".into()
+        };
+    }
+
     /// Native file-picker → `load_video`. Blocking (native modal dialog) —
     /// fine here since the user is deliberately pausing to pick a file.
     fn open_video(&mut self) {
@@ -265,6 +292,7 @@ impl CutvApp {
         self.pending_thumbs = spawn_thumbs(path.clone(), info.duration, self.ctx.clone());
         self.player = Player::new(&path, info.duration, info.fps);
         self.player.set_mute(self.muted);
+        self.player.set_keep_pitch(true);
         self.pending_proxy = spawn_proxy(path.clone(), self.ctx.clone());
 
         let filename = Path::new(&path).file_name().unwrap_or_default().to_string_lossy().to_string();
@@ -287,6 +315,8 @@ impl CutvApp {
         self.crop_mode = false;
         self.crop_rect = None;
         self.crop_drag = None;
+        self.speed = 1.0;
+        self.keep_pitch = true;
         self.frame_hold_dir = 0;
         self.next_hold_tick = 0.0;
         self.status = "Space play  ←→ ±5s  ,. ±1f  I/O in/out  M mute  Enter cut  G gif".into();
@@ -336,7 +366,7 @@ impl CutvApp {
 
         gif::spawn_gif_export(
             self.path.clone(), self.in_t, self.out_t,
-            self.src_w, self.src_h, self.crop_rect,
+            self.src_w, self.src_h, self.crop_rect, self.speed,
             out_path, self.cut_progress_shared.clone(),
             self.gif_result.clone(), self.ctx.clone(),
         );
@@ -370,7 +400,12 @@ impl CutvApp {
         let path       = self.path.clone();
         let in_t       = self.in_t;
         let out_t      = self.out_t;
-        let cut_dur    = (out_t - in_t).max(0.001);
+        let speed      = self.speed;
+        let keep_pitch = self.keep_pitch;
+        // out_time_us below tracks the *output* timeline, which setpts
+        // (applied below when speed != 1) stretches/compresses relative to
+        // the source segment — divide so the progress bar still lands at 1.0.
+        let cut_dur    = (out_t - in_t).max(0.001) / speed;
         let crop_rect  = self.crop_rect;
         let cut_result = self.cut_result.clone();
         let cut_progress = self.cut_progress_shared.clone();
@@ -379,16 +414,46 @@ impl CutvApp {
 
         thread::spawn(move || {
             let enc = encode_args(&path);
+            let has_audio = has_audio_stream(&path);
+            let src_sample_rate = audio_sample_rate(&path);
+            // -t as an INPUT option (before -i) bounds how much source is
+            // read; as an output option (after -i) it bounds the encoded
+            // OUTPUT's duration instead — which silently breaks with a
+            // setpts speed change, since ffmpeg would then read MORE (or
+            // less) than this segment to fill that output duration.
             let mut args = vec![
                 "-y".to_string(),
                 "-ss".to_string(), format!("{in_t:.3}"),
-                "-i".to_string(), path,
                 "-t".to_string(), format!("{:.3}", out_t - in_t),
+                "-i".to_string(), path,
             ];
             args.extend(enc);
+            let speed_changed = (speed - 1.0).abs() > 1e-6;
+            let mut vf = Vec::new();
             if let Some(r) = crop_rect {
+                vf.push(r.to_vf());
+            }
+            if speed_changed {
+                vf.push(format!("setpts={:.6}*PTS", 1.0 / speed));
+            }
+            if !vf.is_empty() {
                 args.push("-vf".to_string());
-                args.push(r.to_vf());
+                args.push(vf.join(","));
+            }
+            if speed_changed && has_audio {
+                // Keep pitch: atempo's WSOLA time-stretch changes tempo only.
+                // Let pitch shift: asetrate scales the sample rate by speed
+                // (tape/vinyl-style), then aresample restores the container's
+                // original rate so the encoder/muxer see a consistent format.
+                let af = if keep_pitch {
+                    atempo_chain(speed)
+                } else {
+                    let sr = src_sample_rate.unwrap_or(44100);
+                    let new_sr = ((sr as f64 * speed).round().max(1.0)) as u32;
+                    format!("asetrate={new_sr},aresample={sr}")
+                };
+                args.push("-af".to_string());
+                args.push(af);
             }
             // Machine-readable progress on stdout, one `key=value` per
             // line, ending each stanza with `progress=continue`/`end` —
@@ -506,6 +571,10 @@ impl eframe::App for CutvApp {
                     new_player.play();
                 }
                 new_player.set_mute(self.muted);
+                if (self.speed - 1.0).abs() > 1e-6 {
+                    new_player.set_speed(self.speed);
+                }
+                new_player.set_keep_pitch(self.keep_pitch);
                 self.player = new_player;
                 self.video_tex = None; // old texture's size may not match; reload on next frame
                 self.status = "Scrub proxy ready — seeking is now fast".into();
@@ -923,6 +992,42 @@ impl CutvApp {
                     .min_size(vec2(74.0, 34.0)))
                     .clicked()
                 { self.do_cut(); }
+
+                ui.add_space(4.0);
+                let speed_lbl = format!("{}×", fmt_speed(self.speed));
+                let speed_fg = if (self.speed - 1.0).abs() > 1e-6 { TXT } else { TXT_DIM };
+                let speed_resp = cbtn(ui, &speed_lbl, speed_fg)
+                    .on_hover_text("Speed / pitch settings");
+                let speed_popup_id = ui.make_persistent_id("speed_popup");
+                if speed_resp.clicked() {
+                    ui.memory_mut(|m| m.toggle_popup(speed_popup_id));
+                }
+                egui::popup_below_widget(
+                    ui, speed_popup_id, &speed_resp,
+                    egui::PopupCloseBehavior::CloseOnClickOutside,
+                    |ui| {
+                        ui.set_min_width(180.0);
+                        ui.label(RichText::new("Speed (preview + export)").color(TXT_DIM).size(10.0));
+                        let mut s = self.speed;
+                        if ui.add(
+                            egui::Slider::new(&mut s, 0.1..=10.0)
+                                .logarithmic(true)
+                                .fixed_decimals(2)
+                                .suffix("×"),
+                        ).changed() {
+                            self.set_speed(s);
+                        }
+                        ui.add_space(4.0);
+                        let mut kp = self.keep_pitch;
+                        if ui.checkbox(&mut kp, "Keep pitch").changed() {
+                            self.set_keep_pitch(kp);
+                        }
+                        ui.add_space(4.0);
+                        if ui.small_button("Reset to 1×").clicked() {
+                            self.set_speed(1.0);
+                        }
+                    },
+                );
 
                 ui.add_space(4.0);
                 let mute_lbl = if self.muted { "Muted" } else { "Sound" };

@@ -1,7 +1,7 @@
 // GIF export: raw RGBA frames are pulled from the source via an ffmpeg
-// subprocess (same pattern as thumbs.rs's frame grabs), cropped/scaled/
-// fps-capped by ffmpeg's `-vf`, and fed to `gifski` for quantization/
-// encoding. Two threads run concurrently — one reads ffmpeg's stdout and
+// subprocess (same pattern as thumbs.rs's frame grabs), cropped/speed-
+// adjusted/scaled/fps-capped by ffmpeg's `-vf`, and fed to `gifski` for
+// quantization/encoding. Two threads run concurrently — one reads ffmpeg's stdout and
 // calls `Collector::add_frame_rgba`, the other drives `Writer::write` —
 // because gifski's collector blocks once its internal queue is full until
 // the writer is actively consuming (see gifski::new's doc comment).
@@ -55,6 +55,7 @@ pub fn spawn_gif_export(
     src_w: u32,
     src_h: u32,
     crop: Option<CropRect>,
+    speed: f64,
     out_path: String,
     progress: Arc<Mutex<f32>>,
     result: Arc<Mutex<Option<GifOutcome>>>,
@@ -72,18 +73,27 @@ pub fn spawn_gif_export(
         if let Some(r) = crop {
             filters.push(r.to_vf());
         }
+        if (speed - 1.0).abs() > 1e-6 {
+            filters.push(format!("setpts={:.6}*PTS", 1.0 / speed));
+        }
         filters.push(format!("scale={gif_w}:{gif_h}:flags=lanczos"));
         filters.push(format!("fps={GIF_FPS}"));
         let vf = filters.join(",");
 
         let dur = (out_t - in_t).max(0.001);
-        let total_frames = ((dur * GIF_FPS).round() as usize).max(1);
+        // `-t` below trims the *source* by this much, but `setpts` above
+        // changes the *output* timeline — the GIF itself runs for dur/speed.
+        let out_dur = dur / speed.max(0.01);
+        let total_frames = ((out_dur * GIF_FPS).round() as usize).max(1);
 
+        // -t before -i bounds the source read; after -i it bounds encoded
+        // OUTPUT duration instead, which breaks with the setpts speed
+        // filter above (ffmpeg would read more/less source to fill it).
         let args = vec![
             "-y".to_string(),
             "-ss".to_string(), format!("{in_t:.3}"),
-            "-i".to_string(), path,
             "-t".to_string(), format!("{dur:.3}"),
+            "-i".to_string(), path,
             "-vf".to_string(), vf,
             "-an".to_string(),
             "-f".to_string(), "rawvideo".to_string(),
