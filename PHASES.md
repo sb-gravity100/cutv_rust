@@ -165,6 +165,17 @@ Goal: with Phase 9 proving the approach out, finish the job — port the remaini
 - [x] `cargo build --release` and `cargo clippy --release` both clean for all four ported files (two clippy nits fixed: `chunks_exact` → `as_chunks` in `gif.rs`, a collapsible `if`/`if let` in `proxy.rs` via a let-chain).
 - [x] Update `FILE_INDEX.md`, `PLAN.md`, `commits.md`.
 
+## Phase 11 — GIF as the default export (DONE 2026-09-27)
+
+Goal: cutting to GIF was already supported (`do_gif`/`gif.rs`, since Phase 4/10) but was the secondary action — the prominent button and `Enter` shortcut produced a video-format cut (`do_cut`). Swapped which action is primary.
+
+- [x] `app.rs`'s edit row: the prominent light-bg button (previously `✂ CUT` → `do_cut`) now reads `✂ GIF` and calls `do_gif`. The former dim `GIF` button is relabeled `MP4` and calls `do_cut` (video-format cut) — still respects crop/speed exactly as before, no change to `export.rs`/`gif.rs` themselves.
+- [x] Keyboard: `Enter` now triggers `do_gif` (previously `do_cut`); `G` still triggers `do_gif` (unchanged). Video-format cut moved to a new `V` shortcut → `do_cut`.
+- [x] Status/comment text referencing "CUT" as the crop-affecting action updated to name both exports generically (crop and speed apply to whichever export runs — GIF or MP4 — unchanged behavior, just corrected wording).
+- [x] No changes to `export.rs`, `gif.rs`, `crop.rs`, or any encode/filter logic — this phase only repoints which UI action is bound to the primary button/shortcut.
+- [x] Not build-verified in this session (no GStreamer/vcpkg toolchain available in this environment — see `PLAN.md`'s "Architecture decision" section); reviewed by inspection. Verify with `cargo build --release`/`cargo clippy --release` on the usual dev machine before relying on it.
+- [x] Update `FILE_INDEX.md`, `PLAN.md`, `commits.md`.
+
 ## Deferred (not scheduled)
 
 - yt-dlp URL download support.

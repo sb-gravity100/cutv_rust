@@ -113,6 +113,8 @@ Two follow-on fixes to the scrub proxy (`proxy.rs`), motivated by this being a c
 7. ~~**`do_cut` export via `ffmpeg-next`**~~ — done, see `PHASES.md` Phase 9 and "The ffmpeg-next export path" above.
 8. ~~**probe/proxy/thumbs/gif via `ffmpeg-next`**~~ — done, see `PHASES.md` Phase 10 and "The ffmpeg-next export path"'s Phase 10 subsection above. `ffmpeg`/`ffprobe` on `PATH` is no longer a runtime dependency at all.
 
+9. ~~**GIF as the default export**~~ — done, see `PHASES.md` Phase 11. The prominent light-bg button and the `Enter`/`G` shortcuts now trigger `do_gif` (GIF export); the dim `MP4` button (bound to `V`) is the secondary action for a video-format cut via `do_cut`. Both still honor crop/speed and share the same progress-bar field.
+
 ## Explicitly deferred
 
 - yt-dlp URL download support — lowest priority, separate concern (download + cache dir), not part of this phase.
