@@ -1072,7 +1072,6 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "rodio",
- "serde_json",
  "windows 0.58.0",
  "winres",
 ]

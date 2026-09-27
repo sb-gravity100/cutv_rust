@@ -15,14 +15,3 @@ pub fn fmt_tc(s: f64) -> String {
 pub fn fmt_speed(s: f64) -> String {
     if s.fract() == 0.0 { format!("{}", s as i64) } else { format!("{s}") }
 }
-
-pub fn parse_fps(s: &str) -> f64 {
-    match s.split_once('/') {
-        Some((n, d)) => {
-            let n: f64 = n.trim().parse().unwrap_or(30.0);
-            let d: f64 = d.trim().parse().unwrap_or(1.0);
-            if d > 0.0 { n / d } else { 30.0 }
-        }
-        None => s.trim().parse().unwrap_or(30.0),
-    }
-}

@@ -8,18 +8,23 @@
 // NLEs solve this the same way: transcode a short-GOP ("all the seeks are
 // cheap") proxy in the background for scrubbing/preview, and only touch the
 // original file for the final export. `do_cut` in app.rs already does that
-// (encode_args always targets `self.path`, the original) — this module just
-// gives `Player` a fast file to point at instead.
+// (export::cut_video always targets `self.path`, the original) — this
+// module just gives `Player` a fast file to point at instead.
+//
+// The transcode itself runs in-process via `ffmpeg-next` (same approach as
+// `export.rs`'s final cut), not a spawned `ffmpeg` subprocess.
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use anyhow::{anyhow, Result};
+use ffmpeg_next as ff;
+use ff::{codec, format, frame, media, Dictionary, Packet, Rational};
 use log::{debug, warn};
 
 /// Bytes sampled from each end of the source file for `video_cache_key` —
@@ -105,11 +110,12 @@ pub fn spawn_proxy(path: String, ctx: egui::Context) -> Arc<Mutex<Option<PathBuf
         let t0 = std::time::Instant::now();
         debug!("scrub proxy: transcoding {path} -> {out_path:?} (GOP={PROXY_GOP})");
 
-        // Try NVENC first (this machine has an NVIDIA GPU — confirmed via
-        // `ffmpeg -encoders`), fall back to libx264 ultrafast if it's
-        // unavailable or fails. Either way: short fixed GOP is what
-        // actually matters here, not the codec/encoder choice.
-        let ok = run_transcode(&path, &tmp_path, true) || run_transcode(&path, &tmp_path, false);
+        // Try NVENC first (matches export.rs's own NVENC-then-CPU-libx264
+        // pattern), fall back to libx264 ultrafast if it's unavailable or
+        // fails. Either way: short fixed GOP is what actually matters here,
+        // not the codec/encoder choice.
+        let ok = run_transcode(&path, &tmp_path, true).is_ok()
+            || run_transcode(&path, &tmp_path, false).is_ok();
 
         if ok && std::fs::rename(&tmp_path, &out_path).is_ok() {
             debug!("scrub proxy: ready in {:?}", t0.elapsed());
@@ -153,44 +159,279 @@ pub fn cleanup_all_proxies() {
     }
 }
 
-fn run_transcode(path: &str, out_path: &std::path::Path, try_nvenc: bool) -> bool {
-    let mut cmd = Command::new("ffmpeg");
-    cmd.args(["-y", "-i", path]);
-    if try_nvenc {
-        cmd.args(["-c:v", "h264_nvenc", "-preset", "p1", "-rc", "vbr", "-cq", "23"]);
+struct VStream {
+    decoder: ff::decoder::Video,
+    encoder: ff::encoder::Video,
+    ost_index: usize,
+    ost_time_base: Rational,
+}
+
+struct AStream {
+    decoder: ff::decoder::Audio,
+    graph: ff::filter::Graph,
+    encoder: ff::encoder::Audio,
+    ost_index: usize,
+    ost_time_base: Rational,
+}
+
+/// Short-GOP passthrough-resolution transcode of the whole file — no crop,
+/// speed, or trim (unlike `export.rs`'s `cut_video`, which needs all
+/// three). `try_nvenc=false` forces the CPU `libx264` path regardless of
+/// NVENC availability, so `spawn_proxy` can try both in sequence.
+fn run_transcode(src_path: &str, tmp_path: &std::path::Path, try_nvenc: bool) -> Result<()> {
+    ff::init()?;
+
+    let mut ictx = format::input(&src_path)?;
+    let tmp_str = tmp_path.to_string_lossy().to_string();
+    let mut octx = format::output_as(&tmp_str, "mp4")?;
+    let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
+
+    let v_index = ictx.streams().best(media::Type::Video).map(|s| s.index());
+    let a_index = ictx.streams().best(media::Type::Audio).map(|s| s.index());
+
+    let mut video = match v_index {
+        Some(idx) => {
+            let stream = ictx.stream(idx).ok_or_else(|| anyhow!("video stream vanished"))?;
+            Some(new_vstream(&stream, &mut octx, try_nvenc, global_header)?)
+        }
+        None => None,
+    };
+    let mut audio = match a_index {
+        Some(idx) => {
+            let stream = ictx.stream(idx).ok_or_else(|| anyhow!("audio stream vanished"))?;
+            Some(new_astream(&stream, &mut octx, global_header)?)
+        }
+        None => None,
+    };
+    if video.is_none() {
+        return Err(anyhow!("no video stream found in: {src_path}"));
+    }
+
+    octx.write_header()?;
+    if let Some(v) = &mut video {
+        v.ost_time_base = octx.stream(v.ost_index).ok_or_else(|| anyhow!("output video stream missing"))?.time_base();
+    }
+    if let Some(a) = &mut audio {
+        a.ost_time_base = octx.stream(a.ost_index).ok_or_else(|| anyhow!("output audio stream missing"))?.time_base();
+    }
+
+    for (stream, packet) in ictx.packets() {
+        let idx = stream.index();
+        if Some(idx) == v_index {
+            let v = video.as_mut().unwrap();
+            v.decoder.send_packet(&packet)?;
+            drain_video(v, &mut octx)?;
+        } else if Some(idx) == a_index && let Some(a) = audio.as_mut() {
+            a.decoder.send_packet(&packet)?;
+            drain_audio(a, &mut octx)?;
+        }
+    }
+
+    if let Some(v) = &mut video {
+        v.decoder.send_eof()?;
+        drain_video(v, &mut octx)?;
+        v.encoder.send_eof()?;
+        drain_video_packets(&mut v.encoder, v.ost_index, v.ost_time_base, &mut octx)?;
+    }
+    if let Some(a) = &mut audio {
+        a.decoder.send_eof()?;
+        drain_audio(a, &mut octx)?;
+        a.graph.get("in").ok_or_else(|| anyhow!("filter graph missing 'in'"))?.source().flush()?;
+        let mut filtered = frame::Audio::empty();
+        while a.graph.get("out").unwrap().sink().frame(&mut filtered).is_ok() {
+            a.encoder.send_frame(&filtered)?;
+            drain_audio_packets(&mut a.encoder, a.ost_index, a.ost_time_base, &mut octx)?;
+        }
+        a.encoder.send_eof()?;
+        drain_audio_packets(&mut a.encoder, a.ost_index, a.ost_time_base, &mut octx)?;
+    }
+
+    octx.write_trailer()?;
+    Ok(())
+}
+
+fn new_vstream(
+    stream: &format::stream::Stream, octx: &mut format::context::Output,
+    try_nvenc: bool, global_header: bool,
+) -> Result<VStream> {
+    let decoder = codec::context::Context::from_parameters(stream.parameters())?
+        .decoder()
+        .video()?;
+
+    let (name, mut opts): (&str, Dictionary) = if try_nvenc {
+        let mut d = Dictionary::new();
+        d.set("preset", "p1");
+        d.set("rc", "vbr");
+        d.set("cq", "23");
+        ("h264_nvenc", d)
     } else {
-        cmd.args(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "20"]);
-    }
-    cmd.args([
-        "-g", &PROXY_GOP.to_string(),
-        "-keyint_min", &PROXY_GOP.to_string(),
-        "-sc_threshold", "0", // disable scene-cut adaptive keyframes — GOP must stay fixed/short
-        "-c:a", "aac", "-b:a", "160k",
-        "-movflags", "+faststart",
-        "-f", "mp4", // output path is a `.mp4.tmp` sibling during transcode (see spawn_proxy) — ffmpeg can't infer the container from that extension, so force it
-    ]);
-    cmd.arg(out_path);
-    cmd.stdout(Stdio::null()).stderr(Stdio::piped());
-    no_window(&mut cmd);
+        let mut d = Dictionary::new();
+        d.set("preset", "ultrafast");
+        d.set("crf", "20");
+        ("libx264", d)
+    };
+    // Fixed short GOP with scene-cut adaptive keyframing disabled — the
+    // whole point of the proxy (see module doc comment): every seek should
+    // only ever have to decode PROXY_GOP frames forward, regardless of
+    // source content.
+    opts.set("keyint_min", &PROXY_GOP.to_string());
+    opts.set("sc_threshold", "0");
 
-    match cmd.output() {
-        Ok(o) if o.status.success() => true,
-        Ok(o) => {
-            let which = if try_nvenc { "nvenc" } else { "libx264" };
-            debug!("scrub proxy: {which} transcode failed: {}", String::from_utf8_lossy(&o.stderr));
-            false
-        }
-        Err(e) => {
-            warn!("scrub proxy: failed to spawn ffmpeg: {e}");
-            false
-        }
+    let enc_codec = ff::encoder::find_by_name(name)
+        .ok_or_else(|| anyhow!("no video encoder registered for {name}"))?;
+
+    let mut ost = octx.add_stream(enc_codec)?;
+    let mut enc_ctx = codec::context::Context::new_with_codec(enc_codec)
+        .encoder()
+        .video()?;
+    enc_ctx.set_width(decoder.width());
+    enc_ctx.set_height(decoder.height());
+    enc_ctx.set_format(decoder.format());
+    enc_ctx.set_aspect_ratio(decoder.aspect_ratio());
+    enc_ctx.set_time_base(stream.time_base());
+    enc_ctx.set_gop(PROXY_GOP);
+    if global_header {
+        enc_ctx.set_flags(codec::Flags::GLOBAL_HEADER);
     }
+
+    let encoder = enc_ctx.open_as_with(enc_codec, opts)?;
+    ost.set_parameters(&encoder);
+    ost.set_time_base(stream.time_base());
+
+    Ok(VStream {
+        decoder, encoder,
+        ost_index: ost.index(),
+        ost_time_base: stream.time_base(), // corrected after write_header()
+    })
 }
 
-fn no_window(cmd: &mut Command) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+fn new_astream(
+    stream: &format::stream::Stream, octx: &mut format::context::Output, global_header: bool,
+) -> Result<AStream> {
+    let decoder = codec::context::Context::from_parameters(stream.parameters())?
+        .decoder()
+        .audio()?;
+
+    let enc_codec = ff::encoder::find_by_name("aac")
+        .ok_or_else(|| anyhow!("no audio encoder registered for aac"))?;
+
+    let mut ost = octx.add_stream(enc_codec)?;
+    let mut enc_ctx = codec::context::Context::new_with_codec(enc_codec)
+        .encoder()
+        .audio()?;
+
+    let enc_audio = enc_codec.audio()?;
+    let channel_layout = enc_audio
+        .channel_layouts()
+        .map(|cls| cls.best(decoder.channel_layout().channels()))
+        .unwrap_or(ff::channel_layout::ChannelLayout::STEREO);
+
+    if global_header { enc_ctx.set_flags(codec::Flags::GLOBAL_HEADER); }
+    enc_ctx.set_rate(decoder.rate() as i32);
+    enc_ctx.set_channel_layout(channel_layout);
+    enc_ctx.set_format(
+        enc_audio.formats().and_then(|mut f| f.next())
+            .ok_or_else(|| anyhow!("aac: no supported sample formats"))?,
+    );
+    enc_ctx.set_bit_rate(160_000);
+    enc_ctx.set_time_base((1, decoder.rate() as i32));
+
+    let encoder = enc_ctx.open_as(enc_codec)?;
+    ost.set_parameters(&encoder);
+    ost.set_time_base((1, decoder.rate() as i32));
+
+    // Same pattern as export.rs's AudioPipe: the format/channel-layout/rate
+    // conversion is an explicit trailing `aformat` filter stage (not the
+    // struct-based abuffersink setters, which hit a broken channel_layouts
+    // AVOption against this FFmpeg build and segfault once real filtering
+    // is involved — see export.rs's build_graph doc comment), and AAC's
+    // fixed frame_size needs `asetnsamples` to rechunk into exactly that
+    // many samples per frame.
+    let aformat = format!(
+        "aformat=sample_fmts={}:sample_rates={}:channel_layouts=0x{:x}",
+        encoder.format().name(), encoder.rate(), encoder.channel_layout().bits(),
+    );
+    let mut stages = vec!["anull".to_string(), aformat];
+    let frame_size = encoder.frame_size();
+    if frame_size > 0 {
+        stages.push(format!("asetnsamples=n={frame_size}:p=0"));
     }
+    let graph = build_audio_graph(&decoder, stream.time_base(), &stages.join(","))?;
+
+    Ok(AStream {
+        decoder, graph, encoder,
+        ost_index: ost.index(),
+        ost_time_base: stream.time_base(), // corrected after write_header()
+    })
 }
+
+fn build_audio_graph(decoder: &ff::decoder::Audio, tb: Rational, spec: &str) -> Result<ff::filter::Graph> {
+    let mut graph = ff::filter::Graph::new();
+    // abuffer's declared time_base must match what decoded frames actually
+    // carry as pts — the STREAM's time_base, not decoder.time_base() (see
+    // export.rs's build_graph doc comment for the WebM-source bug this
+    // distinction caused there).
+    let args = format!(
+        "time_base={}/{}:sample_rate={}:sample_fmt={}:channel_layout=0x{:x}",
+        tb.numerator(), tb.denominator(),
+        decoder.rate(), decoder.format().name(), decoder.channel_layout().bits(),
+    );
+    graph.add(&ff::filter::find("abuffer").ok_or_else(|| anyhow!("no abuffer filter"))?, "in", &args)?;
+    graph.add(&ff::filter::find("abuffersink").ok_or_else(|| anyhow!("no abuffersink filter"))?, "out", "")?;
+    graph.output("in", 0)?.input("out", 0)?.parse(spec)?;
+    graph.validate()?;
+    Ok(graph)
+}
+
+fn drain_video(v: &mut VStream, octx: &mut format::context::Output) -> Result<()> {
+    let mut frame = frame::Video::empty();
+    while v.decoder.receive_frame(&mut frame).is_ok() {
+        v.encoder.send_frame(&frame)?;
+        drain_video_packets(&mut v.encoder, v.ost_index, v.ost_time_base, octx)?;
+    }
+    Ok(())
+}
+
+fn drain_video_packets(
+    encoder: &mut ff::encoder::Video, ost_index: usize, ost_tb: Rational,
+    octx: &mut format::context::Output,
+) -> Result<()> {
+    let mut pkt = Packet::empty();
+    while encoder.receive_packet(&mut pkt).is_ok() {
+        pkt.set_stream(ost_index);
+        // rescale from the ENCODER's own time_base (what receive_packet
+        // actually hands back), not the input stream's — see export.rs's
+        // drain_video_packets doc comment for the WebM-source bug that
+        // distinction caused on the audio side.
+        pkt.rescale_ts(encoder.time_base(), ost_tb);
+        pkt.write_interleaved(octx)?;
+    }
+    Ok(())
+}
+
+fn drain_audio(a: &mut AStream, octx: &mut format::context::Output) -> Result<()> {
+    let mut frame = frame::Audio::empty();
+    while a.decoder.receive_frame(&mut frame).is_ok() {
+        a.graph.get("in").ok_or_else(|| anyhow!("filter graph missing 'in'"))?.source().add(&frame)?;
+        let mut filtered = frame::Audio::empty();
+        while a.graph.get("out").unwrap().sink().frame(&mut filtered).is_ok() {
+            a.encoder.send_frame(&filtered)?;
+            drain_audio_packets(&mut a.encoder, a.ost_index, a.ost_time_base, octx)?;
+        }
+    }
+    Ok(())
+}
+
+fn drain_audio_packets(
+    encoder: &mut ff::encoder::Audio, ost_index: usize, ost_tb: Rational,
+    octx: &mut format::context::Output,
+) -> Result<()> {
+    let mut pkt = Packet::empty();
+    while encoder.receive_packet(&mut pkt).is_ok() {
+        pkt.set_stream(ost_index);
+        pkt.rescale_ts(encoder.time_base(), ost_tb);
+        pkt.write_interleaved(octx)?;
+    }
+    Ok(())
+}
+

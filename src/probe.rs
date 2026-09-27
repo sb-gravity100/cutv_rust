@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
+use ffmpeg_next as ff;
+use ff::media;
 use log::debug;
-use serde_json::Value;
-use std::process::Command;
 use std::sync::OnceLock;
 
 pub struct VideoInfo {
@@ -11,64 +11,61 @@ pub struct VideoInfo {
     pub height:   u32,
 }
 
-pub fn ffprobe(path: &str) -> Value {
-    debug!("ffprobe: {path}");
-    let out = Command::new("ffprobe")
-        .args([
-            "-v", "quiet",
-            "-print_format", "json",
-            "-show_streams",
-            "-show_format",
-            path,
-        ])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            serde_json::from_slice(&o.stdout).unwrap_or(Value::Null)
-        }
-        Ok(o) => {
-            log::warn!("ffprobe stderr: {}", String::from_utf8_lossy(&o.stderr));
-            Value::Null
-        }
-        Err(e) => { log::warn!("ffprobe exec: {e}"); Value::Null }
-    }
-}
+/// ffmpeg's global microsecond time base (`AV_TIME_BASE`) — same constant
+/// `export.rs` uses for its own seek/duration math.
+const AV_TIME_BASE: i64 = 1_000_000;
 
+/// Reads duration/fps/width/height directly via `ffmpeg-next` (libavformat)
+/// instead of shelling out to `ffprobe` — the same in-process approach
+/// `export.rs` uses for the final cut. Opens a decoder just long enough to
+/// read `width()`/`height()` (`codec::Parameters` doesn't expose them
+/// directly in this crate version); no frames are actually decoded.
 pub fn probe_video(path: &str) -> Result<VideoInfo> {
-    let info = ffprobe(path);
-    let streams = info["streams"]
-        .as_array()
-        .ok_or_else(|| anyhow!("ffprobe returned no streams for: {path}"))?;
+    ff::init()?;
+    let ictx = ff::format::input(&path)?;
+    let stream = ictx.streams().best(media::Type::Video)
+        .ok_or_else(|| anyhow!("no video stream found in: {path}"))?;
 
-    for s in streams {
-        if s["codec_type"].as_str() != Some("video") { continue; }
-        let width  = s["width"].as_u64().ok_or_else(|| anyhow!("no width"))? as u32;
-        let height = s["height"].as_u64().ok_or_else(|| anyhow!("no height"))? as u32;
-        let fps    = crate::util::parse_fps(s["r_frame_rate"].as_str().unwrap_or("30/1"));
-        let dur    = info["format"]["duration"].as_str()
-            .and_then(|s| s.parse::<f64>().ok())
-            .or_else(|| s["duration"].as_str().and_then(|v| v.parse().ok()))
-            .ok_or_else(|| anyhow!("no duration in: {path}"))?;
-        debug!("probe: {width}x{height} @ {fps:.3}fps  dur={dur:.3}s");
-        return Ok(VideoInfo { duration: dur, fps, width, height });
-    }
-    Err(anyhow!("no video stream found in: {path}"))
+    let rate = stream.rate();
+    let fps = if rate.denominator() > 0 {
+        rate.numerator() as f64 / rate.denominator() as f64
+    } else {
+        30.0
+    };
+
+    let container_dur = ictx.duration();
+    let duration = if container_dur > 0 {
+        container_dur as f64 / AV_TIME_BASE as f64
+    } else {
+        let tb = stream.time_base();
+        let sdur = stream.duration();
+        if sdur > 0 && tb.denominator() > 0 {
+            sdur as f64 * tb.numerator() as f64 / tb.denominator() as f64
+        } else {
+            return Err(anyhow!("no duration in: {path}"));
+        }
+    };
+
+    let decoder = ff::codec::context::Context::from_parameters(stream.parameters())?
+        .decoder()
+        .video()?;
+    let width = decoder.width();
+    let height = decoder.height();
+
+    debug!("probe: {width}x{height} @ {fps:.3}fps  dur={duration:.3}s");
+    Ok(VideoInfo { duration, fps, width, height })
 }
 
-/// Whether the `PATH` ffmpeg has NVENC support (`h264_nvenc` in `-encoders`).
-/// Cached — shells out at most once per process. Unrelated to GStreamer's
-/// own (currently broken) `nvcodec` feature, which is playback-decode only;
-/// this is about the final export encoder (`export.rs`'s NVENC selection).
+/// Whether an NVENC h264 encoder is registered in the linked FFmpeg build.
+/// Cached — the registry lookup is cheap but this also runs `ff::init()`,
+/// which only needs to happen once. Unrelated to GStreamer's own
+/// (currently broken) `nvcodec` feature, which is playback-decode only;
+/// this is about `export.rs`'s and `proxy.rs`'s NVENC encoder selection.
 pub fn nvenc_available() -> bool {
     static CACHE: OnceLock<bool> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        let out = Command::new("ffmpeg")
-            .args(["-hide_banner", "-encoders"])
-            .output();
-        let available = match out {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).contains("h264_nvenc"),
-            Err(e) => { log::warn!("nvenc probe exec: {e}"); false }
-        };
+        let _ = ff::init();
+        let available = ff::encoder::find_by_name("h264_nvenc").is_some();
         debug!("nvenc_available={available}");
         available
     })
@@ -77,7 +74,7 @@ pub fn nvenc_available() -> bool {
 /// ffmpeg's `atempo` filter only accepts a 0.5-2.0 rate per stage; chain
 /// multiple stages to cover this app's full speed range (0.1x-10x). Used as
 /// a libavfilter graph-string fragment by `export.rs` (pitch-preserving
-/// speed change) — same string shape as the CLI `-af` value this replaced.
+/// speed change).
 pub fn atempo_chain(rate: f64) -> String {
     let mut r = rate.max(0.01);
     let mut stages = Vec::new();
