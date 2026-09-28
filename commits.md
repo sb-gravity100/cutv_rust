@@ -1,3 +1,6 @@
+### `e5dd8e6` · 2026-09-28 · build: add Inno Setup installer script (exe-only)
+- `installer/cutv.iss`
+
 # commits.md
 
 Commit log — prepend a new entry after every commit.
