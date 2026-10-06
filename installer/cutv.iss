@@ -24,13 +24,36 @@ SetupIconFile=..\assets\icon.ico
 UninstallDisplayIcon={app}\{#AppExe}
 Compression=lzma2
 SolidCompression=yes
+ChangesAssociations=yes
 ArchitecturesInstallIn64BitMode=x64compatible
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
+Name: "contextmenu"; Description: "Add ""Cut with CUTV"" to the Explorer right-click menu for videos"
 
 [Files]
 Source: "..\target\release\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
+
+; Per-extension verbs: the PerceivedType-level SystemFileAssociationsideo key
+; doesn't show in the main right-click menu on Windows 10 (see PHASES.md).
+; HKA = HKCU for a per-user install, HKLM for an all-users one. Silent updates
+; keep the user's original task choice (UsePreviousTasks defaults to yes).
+[Registry]
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.mp4\shell\CutWithCUTV"; ValueType: string; ValueData: "Cut with CUTV"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.mp4\shell\CutWithCUTV"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\{#AppExe}"",0"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.mp4\shell\CutWithCUTV\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" ""%1"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.mov\shell\CutWithCUTV"; ValueType: string; ValueData: "Cut with CUTV"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.mov\shell\CutWithCUTV"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\{#AppExe}"",0"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.mov\shell\CutWithCUTV\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" ""%1"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.avi\shell\CutWithCUTV"; ValueType: string; ValueData: "Cut with CUTV"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.avi\shell\CutWithCUTV"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\{#AppExe}"",0"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.avi\shell\CutWithCUTV\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" ""%1"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.mkv\shell\CutWithCUTV"; ValueType: string; ValueData: "Cut with CUTV"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.mkv\shell\CutWithCUTV"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\{#AppExe}"",0"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.mkv\shell\CutWithCUTV\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" ""%1"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.webm\shell\CutWithCUTV"; ValueType: string; ValueData: "Cut with CUTV"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.webm\shell\CutWithCUTV"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\{#AppExe}"",0"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.webm\shell\CutWithCUTV\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" ""%1"""; Tasks: contextmenu
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
