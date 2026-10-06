@@ -1,3 +1,9 @@
+### `9b57ce9` · 2026-10-06 · docs: index README
+- `FILE_INDEX.md`
+
+### `e5d2428` · 2026-10-06 · docs: add README
+- `README.md`
+
 ### `cddf8c6` · 2026-10-06 · docs: index PATH task and cutv.cmd
 - `FILE_INDEX.md`
 
