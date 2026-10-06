@@ -25,14 +25,17 @@ UninstallDisplayIcon={app}\{#AppExe}
 Compression=lzma2
 SolidCompression=yes
 ChangesAssociations=yes
+ChangesEnvironment=yes
 ArchitecturesInstallIn64BitMode=x64compatible
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 Name: "contextmenu"; Description: "Add ""Cut with CUTV"" to the Explorer right-click menu for videos"
+Name: "addtopath"; Description: "Add CUTV to PATH (run ""cutv <video>"" from a terminal)"
 
 [Files]
 Source: "..\target\release\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "cutv.cmd"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Per-extension verbs: the PerceivedType-level SystemFileAssociationsideo key
 ; doesn't show in the main right-click menu on Windows 10 (see PHASES.md).
@@ -62,3 +65,46 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// PATH entry for the "addtopath" task: user PATH for a per-user install, system
+// PATH for an all-users one. Added once (no duplicates), removed on uninstall.
+function EnvRoot: Integer;
+begin
+  if IsAdminInstallMode then Result := HKEY_LOCAL_MACHINE else Result := HKEY_CURRENT_USER;
+end;
+
+function EnvKey: String;
+begin
+  if IsAdminInstallMode then Result := 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+  else Result := 'Environment';
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var Path, Dir: String;
+begin
+  if (CurStep = ssPostInstall) and WizardIsTaskSelected('addtopath') then begin
+    Dir := ExpandConstant('{app}');
+    if not RegQueryStringValue(EnvRoot, EnvKey, 'Path', Path) then Path := '';
+    if Pos(';' + Uppercase(Dir) + ';', ';' + Uppercase(Path) + ';') = 0 then begin
+      if (Path <> '') and (Copy(Path, Length(Path), 1) <> ';') then Path := Path + ';';
+      RegWriteExpandStringValue(EnvRoot, EnvKey, 'Path', Path + Dir);
+      Log('Added to PATH: ' + Dir);
+    end;
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var Path, Dir: String; P: Integer;
+begin
+  if CurUninstallStep <> usPostUninstall then exit;
+  if not RegQueryStringValue(EnvRoot, EnvKey, 'Path', Path) then exit;
+  Dir := ExpandConstant('{app}');
+  Path := ';' + Path + ';';
+  P := Pos(';' + Uppercase(Dir) + ';', Uppercase(Path));
+  if P = 0 then exit;
+  Delete(Path, P, Length(Dir) + 1);
+  Path := Copy(Path, 2, Length(Path) - 2);
+  RegWriteExpandStringValue(EnvRoot, EnvKey, 'Path', Path);
+  Log('Removed from PATH: ' + Dir);
+end;
