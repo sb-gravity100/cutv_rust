@@ -1,3 +1,9 @@
+### `2dc28d5` · 2026-10-06 · docs: README no-arg launch behavior
+- `README.md`
+
+### `626c65a` · 2026-10-06 · feat: file picker when launched with no args and no video in cwd
+- `src/main.rs`
+
 ### `9b57ce9` · 2026-10-06 · docs: index README
 - `FILE_INDEX.md`
 
