@@ -15,6 +15,7 @@ File system index with tags and one-line descriptions. Update whenever files are
 - `package.json` — `[build]` release tooling only (`npm run bump`, `npm run release`); no JS in the app.
 - `scripts/bump-version.mjs` — `[build]` bumps the version in `Cargo.toml` (the single source of truth), refreshes `Cargo.lock`, commits `chore: release vX.Y.Z` and tags it.
 - `scripts/release.mjs` — `[build]` preflight → `cargo build --release` → ISCC → Ed25519-signs the installer with `~/.cutv/update-signing.pem` → writes `target/installer/latest.json` → pushes the tag and runs `gh release create`. `--dry-run`/`--skip-build`.
+- `README.md` — `[docs]` public-facing README: features, shortcuts, install options, build-from-source, release flow.
 - `CLAUDE.md` — `[docs]` session rules + project architecture guidance for Claude Code.
 - `.gitignore` — `[build]` ignores `/target`.
 
