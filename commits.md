@@ -1,3 +1,7 @@
+### `509cf86` · 2026-10-06 · feat: export overrides for framerate, bitrate, resolution (default source)
+- `src/export.rs`
+- `src/app.rs`
+
 ### `e5dd8e6` · 2026-09-28 · build: add Inno Setup installer script (exe-only)
 - `installer/cutv.iss`
 
