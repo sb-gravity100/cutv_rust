@@ -1,3 +1,10 @@
+### `cddf8c6` · 2026-10-06 · docs: index PATH task and cutv.cmd
+- `FILE_INDEX.md`
+
+### `e7ca60a` · 2026-10-06 · build: optional 'Add CUTV to PATH' installer task with cutv.cmd shim
+- `installer/cutv.cmd`
+- `installer/cutv.iss`
+
 ### `687d1f5` · 2026-10-06 · docs: note installer-managed context menu
 - `FILE_INDEX.md`
 - `PHASES.md`
