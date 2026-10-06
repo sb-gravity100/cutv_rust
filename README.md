@@ -89,7 +89,7 @@ After that, CUTV keeps itself current: when a new release is out, an **Update & 
 cutv path/to/video.mp4
 ```
 
-Run `cutv` with no argument to open the newest video in the current folder, or use the **Open** button inside the app.
+Run `cutv` with no argument to open the newest video in the current folder. If there isn't one, a file picker opens. The **Open** button inside the app also switches videos.
 
 ## Building from source
 
