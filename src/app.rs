@@ -93,6 +93,9 @@ pub struct CutvApp {
     // time-stretch) or let it shift with speed, tape/vinyl-style
     // (identity/asetrate). Resets to true (preserve) on a new video load.
     keep_pitch: bool,
+    // Cut output overrides (fps / bitrate / resolution); None = source.
+    // Kept across video loads — they're export preferences, not per-clip.
+    export_opts: crate::export::ExportOpts,
 
     thumb_texs:     Vec<(f64, egui::TextureHandle)>,
     pending_thumbs: Arc<Mutex<Vec<ThumbData>>>,
@@ -150,6 +153,7 @@ impl CutvApp {
             muted: false,
             speed: 1.0,
             keep_pitch: true,
+            export_opts: Default::default(),
             thumb_texs: Vec::new(),
             pending_thumbs,
             tl_drag: None,
@@ -401,6 +405,7 @@ impl CutvApp {
         let speed      = self.speed;
         let keep_pitch = self.keep_pitch;
         let crop_rect  = self.crop_rect;
+        let export_opts = self.export_opts;
         let cut_result = self.cut_result.clone();
         let cut_progress = self.cut_progress_shared.clone();
         let ctx        = self.ctx.clone();
@@ -409,13 +414,13 @@ impl CutvApp {
         thread::spawn(move || {
             debug!(
                 "ffmpeg-next cut: {path} [{in_t:.3} → {out_t:.3}] crop={crop_rect:?} \
-                 speed={speed} keep_pitch={keep_pitch} -> {out_path}"
+                 speed={speed} keep_pitch={keep_pitch} opts={export_opts:?} -> {out_path}"
             );
 
             let progress_ctx = ctx.clone();
             let progress_shared = cut_progress.clone();
             let result = crate::export::cut_video(
-                &path, &out_path, in_t, out_t, crop_rect, speed, keep_pitch,
+                &path, &out_path, in_t, out_t, crop_rect, speed, keep_pitch, export_opts,
                 move |frac| {
                     *progress_shared.lock().unwrap() = frac;
                     progress_ctx.request_repaint();
@@ -937,6 +942,9 @@ impl CutvApp {
                 );
 
                 ui.add_space(4.0);
+                self.ui_export_popup(ui);
+
+                ui.add_space(4.0);
                 let mute_lbl = if self.muted { "Muted" } else { "Sound" };
                 let mute_fg  = if self.muted { C_OUT } else { TXT_DIM };
                 if cbtn(ui, mute_lbl, mute_fg).clicked() { self.toggle_mute(); }
@@ -960,6 +968,71 @@ impl CutvApp {
                 ui.add_space(4.0);
                 if cbtn(ui, "📂 Open", TXT_DIM).clicked() { self.open_video(); }
             });
+        });
+    }
+
+    /// "Export" button + popup: fps / bitrate / resolution overrides for
+    /// CUT. Each row has a "Source" checkbox (default) that disables it.
+    fn ui_export_popup(&mut self, ui: &mut egui::Ui) {
+        let o = self.export_opts;
+        let custom = o != Default::default();
+        let resp = cbtn(ui, "⚙ Export", if custom { TXT } else { TXT_DIM })
+            .on_hover_text("Output framerate / bitrate / resolution (default: source)");
+        let id = ui.make_persistent_id("export_popup");
+        if resp.clicked() { ui.memory_mut(|m| m.toggle_popup(id)); }
+        let (src_fps, src_h) = (self.fps, self.src_h);
+        egui::popup_below_widget(ui, id, &resp, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+            ui.set_min_width(220.0);
+            ui.label(RichText::new("CUT output (unchecked = custom)").color(TXT_DIM).size(10.0));
+            let before = self.export_opts;
+            let o = &mut self.export_opts;
+            egui::Grid::new("export_grid").num_columns(3).show(ui, |ui| {
+                // Framerate
+                ui.label("Framerate");
+                let mut src = o.fps.is_none();
+                if ui.checkbox(&mut src, "Source").changed() {
+                    o.fps = if src { None } else { Some(src_fps.round().max(1.0)) };
+                }
+                if let Some(f) = &mut o.fps {
+                    ui.add(egui::DragValue::new(f).range(1.0..=240.0).speed(0.5).suffix(" fps"));
+                } else {
+                    ui.label(RichText::new(format!("{src_fps:.3}")).color(TXT_DIM));
+                }
+                ui.end_row();
+                // Bitrate
+                ui.label("Bitrate");
+                let mut src = o.bitrate_kbps.is_none();
+                if ui.checkbox(&mut src, "Source").changed() {
+                    o.bitrate_kbps = if src { None } else { Some(8000) };
+                }
+                if let Some(b) = &mut o.bitrate_kbps {
+                    ui.add(egui::DragValue::new(b).range(100..=200_000).speed(50).suffix(" kbps"));
+                } else {
+                    ui.label(RichText::new("auto").color(TXT_DIM));
+                }
+                ui.end_row();
+                // Resolution (target height, aspect kept)
+                ui.label("Resolution");
+                let mut src = o.height.is_none();
+                if ui.checkbox(&mut src, "Source").changed() {
+                    o.height = if src { None } else { Some(src_h.min(1080).max(2)) };
+                }
+                if let Some(h) = &mut o.height {
+                    egui::ComboBox::from_id_salt("export_h")
+                        .selected_text(format!("{h}p"))
+                        .show_ui(ui, |ui| {
+                            for p in [2160u32, 1440, 1080, 720, 480, 360, 240] {
+                                ui.selectable_value(h, p, format!("{p}p"));
+                            }
+                        });
+                } else {
+                    ui.label(RichText::new(format!("{src_h}p")).color(TXT_DIM));
+                }
+                ui.end_row();
+            });
+            ui.add_space(4.0);
+            if ui.small_button("Reset to source").clicked() { *o = Default::default(); }
+            if *o != before { debug!("export opts -> {:?}", self.export_opts); }
         });
     }
 

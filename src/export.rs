@@ -15,6 +15,7 @@ use ffmpeg_next as ff;
 use ff::{Dictionary, Packet, Rational, codec, format, frame, media};
 
 use crate::crop::CropRect;
+use log::debug;
 use crate::probe::atempo_chain;
 
 /// ffmpeg's global microsecond time base (`AV_TIME_BASE`), used by
@@ -100,6 +101,17 @@ struct VideoEncSpec {
     qscale: Option<i32>,
 }
 
+/// User overrides for the cut's output video. Each `None` means "same as
+/// source" (the default) — no extra filter / the source-derived bitrate.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ExportOpts {
+    pub fps: Option<f64>,
+    pub bitrate_kbps: Option<u64>,
+    /// Target output height; width follows the (post-crop) aspect ratio,
+    /// rounded to even for encoder compatibility.
+    pub height: Option<u32>,
+}
+
 fn video_enc_spec(id: codec::Id, use_nvenc: bool, br_kbps: Option<u64>) -> VideoEncSpec {
     use codec::Id as I;
     let (name, opts, qscale): (&'static str, Dictionary<'static>, Option<i32>) = match id {
@@ -163,6 +175,7 @@ impl VideoPipe {
         use_nvenc: bool,
         crop: Option<CropRect>,
         speed: f64,
+        opts: ExportOpts,
         global_header: bool,
         in_t: f64,
     ) -> Result<Self> {
@@ -172,6 +185,10 @@ impl VideoPipe {
 
         let br_kbps = (stream.parameters().bit_rate() > 0)
             .then(|| (stream.parameters().bit_rate() as u64 / 1000).max(100));
+        let br_kbps = match opts.bitrate_kbps {
+            Some(b) => { debug!("export: bitrate override {b} kbps (source {br_kbps:?})"); Some(b.max(100)) }
+            None => br_kbps,
+        };
         let spec = video_enc_spec(stream.parameters().id(), use_nvenc, br_kbps);
 
         let enc_codec = ff::encoder::find_by_name(spec.name)
@@ -186,6 +203,15 @@ impl VideoPipe {
             Some(c) => (c.w.round() as u32, c.h.round() as u32),
             None => (decoder.width(), decoder.height()),
         };
+        // Resolution override: scale the (post-crop) frame to the target
+        // height, keeping aspect; both dims forced even.
+        let scaled = opts.height.map(|h| {
+            let h = (h.max(2) / 2) * 2;
+            let w = ((out_w as f64 * h as f64 / out_h.max(1) as f64 / 2.0).round() as u32).max(1) * 2;
+            (w, h)
+        }).filter(|&d| d != (out_w, out_h));
+        let (out_w, out_h) = scaled.unwrap_or((out_w, out_h));
+        if let Some((w, h)) = scaled { debug!("export: scaling to {w}x{h}"); }
         enc_ctx.set_width(out_w);
         enc_ctx.set_height(out_h);
         enc_ctx.set_format(decoder.format());
@@ -215,6 +241,14 @@ impl VideoPipe {
         if let Some(c) = crop { vf.push(c.to_vf()); }
         let speed_changed = (speed - 1.0).abs() > 1e-6;
         if speed_changed { vf.push(format!("setpts={:.6}*PTS", 1.0 / speed)); }
+        if let Some((w, h)) = scaled { vf.push(format!("scale={w}:{h}:flags=lanczos")); }
+        if let Some(fps) = opts.fps.filter(|f| *f > 0.0) {
+            debug!("export: fps override {fps}");
+            // fps changes the link time_base to 1/fps; settb restores the
+            // stream time_base the encoder/muxer were configured with.
+            let tb = stream.time_base();
+            vf.push(format!("fps={fps:.6},settb={}/{}", tb.numerator(), tb.denominator()));
+        }
         let graph = if vf.is_empty() {
             None
         } else {
@@ -575,6 +609,7 @@ pub fn cut_video(
     crop: Option<CropRect>,
     speed: f64,
     keep_pitch: bool,
+    opts: ExportOpts,
     mut on_progress: impl FnMut(f32),
 ) -> Result<()> {
     ff::init()?;
@@ -590,7 +625,7 @@ pub fn cut_video(
     let mut video = match v_index {
         Some(idx) => {
             let stream = ictx.stream(idx).ok_or_else(|| anyhow!("video stream {idx} vanished"))?;
-            Some(VideoPipe::new(&stream, &mut octx, use_nvenc, crop, speed, global_header, in_t)?)
+            Some(VideoPipe::new(&stream, &mut octx, use_nvenc, crop, speed, opts, global_header, in_t)?)
         }
         None => None,
     };
