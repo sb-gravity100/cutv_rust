@@ -1,3 +1,10 @@
+### `687d1f5` · 2026-10-06 · docs: note installer-managed context menu
+- `FILE_INDEX.md`
+- `PHASES.md`
+
+### `cc31657` · 2026-10-06 · build: optional Explorer context-menu entry in installer
+- `installer/cutv.iss`
+
 ### `82bc535` · 2026-10-06 · docs: sync planning docs for release tooling and auto-updater
 - `FILE_INDEX.md`
 - `PLAN.md`
