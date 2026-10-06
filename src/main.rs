@@ -16,6 +16,7 @@ mod player;
 mod probe;
 mod proxy;
 mod thumbs;
+mod updater;
 mod util;
 
 use anyhow::{bail, ensure, Result};
@@ -104,7 +105,7 @@ fn main() -> Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(format!("CUTV  —  {filename}"))
+            .with_title(format!("CUTV v{}  —  {filename}", updater::VERSION))
             .with_inner_size([dw as f32, dh as f32 + 255.0])
             .with_min_inner_size([360.0, 280.0])
             .with_resizable(true)

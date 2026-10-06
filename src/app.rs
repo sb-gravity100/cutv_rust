@@ -14,6 +14,7 @@ use crate::gif::{self, GifOutcome};
 use crate::player::Player;
 use crate::proxy::spawn_proxy;
 use crate::thumbs::{ThumbData, spawn_thumbs};
+use crate::updater::{self, PendingUpdate};
 use crate::util::{fmt_speed, fmt_tc};
 
 // ── Palette ───────────────────────────────────────────────────────────────────
@@ -114,6 +115,7 @@ pub struct CutvApp {
     cut_progress_shared: Arc<Mutex<f32>>, // written by do_cut()/do_gif()'s worker thread as export progresses
     cut_result:   Arc<Mutex<Option<CutResult>>>,
     gif_result:   Arc<Mutex<Option<GifOutcome>>>,
+    update:       PendingUpdate, // filled by updater::spawn_check once a verified installer is downloaded
 }
 
 impl CutvApp {
@@ -131,6 +133,7 @@ impl CutvApp {
         let mut player = Player::new(&path, duration, fps);
         player.set_keep_pitch(true);
         let pending_proxy = spawn_proxy(path.clone(), ctx.clone());
+        let update = updater::spawn_check(ctx.clone());
 
         CutvApp {
             ctx,
@@ -167,6 +170,7 @@ impl CutvApp {
             cut_progress_shared: Arc::new(Mutex::new(0.0)),
             cut_result: Arc::new(Mutex::new(None)),
             gif_result: Arc::new(Mutex::new(None)),
+            update,
         }
     }
 
@@ -298,7 +302,7 @@ impl CutvApp {
         self.pending_proxy = spawn_proxy(path.clone(), self.ctx.clone());
 
         let filename = Path::new(&path).file_name().unwrap_or_default().to_string_lossy().to_string();
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("CUTV  —  {filename}")));
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("CUTV v{}  —  {filename}", updater::VERSION)));
 
         self.path = path;
         self.duration = info.duration;
@@ -1046,7 +1050,7 @@ impl CutvApp {
         }
     }
 
-    fn ui_status(&self, ui: &mut egui::Ui) {
+    fn ui_status(&mut self, ui: &mut egui::Ui) {
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
         ui.painter().rect_filled(r, 0.0, BG_DRK);
         ui.painter().text(
@@ -1056,6 +1060,19 @@ impl CutvApp {
             FontId::proportional(11.0),
             Color32::from_rgb(0xaa, 0xaa, 0xaa),
         );
+
+        let ready = self.update.lock().unwrap().clone();
+        if let Some(ready) = ready {
+            let btn = egui::Rect::from_min_max(pos2(r.right() - 170.0, r.top() + 2.0), pos2(r.right() - 6.0, r.bottom() - 2.0));
+            let label = RichText::new(format!("Update to v{} & restart", ready.version)).color(TXT).size(11.0);
+            let clicked = ui.put(btn, egui::Button::new(label).fill(Color32::from_rgb(0x2e, 0x7d, 0x32)).stroke(Stroke::NONE)).clicked();
+            if clicked {
+                debug!("update button clicked: v{}", ready.version);
+                self.player.pause();
+                crate::proxy::cleanup_all_proxies();
+                updater::install_and_restart(&ready, &self.path);
+            }
+        }
     }
 }
 
