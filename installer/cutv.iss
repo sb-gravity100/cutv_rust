@@ -1,8 +1,12 @@
 ; Inno Setup script — exe-only installer. Requires the GStreamer/FFmpeg
 ; runtime (vcpkg install + GST_PLUGIN_PATH/PATH) already set up on the target.
-; Build: cargo build --release, then ISCC installer\cutv.iss
+; Built by scripts/release.mjs, which passes /DAppVersion=<Cargo.toml version>.
+; Installs per-user (no UAC prompt), so the in-app updater can run it with
+; /VERYSILENT and nothing pops up (src/updater.rs).
 #define AppName "CUTV"
-#define AppVersion "0.1.0"
+#ifndef AppVersion
+  #error Pass /DAppVersion=x.y.z (npm run release does this)
+#endif
 #define AppExe "cutv_rust.exe"
 
 [Setup]
@@ -11,7 +15,9 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
+PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
+CloseApplications=force
 OutputDir=..\target\installer
 OutputBaseFilename=cutv-setup-{#AppVersion}
 SetupIconFile=..\assets\icon.ico
