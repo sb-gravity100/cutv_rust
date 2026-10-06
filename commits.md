@@ -1,3 +1,20 @@
+### `82bc535` · 2026-10-06 · docs: sync planning docs for release tooling and auto-updater
+- `FILE_INDEX.md`
+- `PLAN.md`
+
+### `452a6bf` · 2026-10-06 · build: Cargo.toml-driven versioning, signed release script, per-user installer
+- `installer/cutv.iss`
+- `package.json`
+- `scripts/bump-version.mjs`
+- `scripts/release.mjs`
+
+### `e8906c4` · 2026-10-06 · feat: signed in-app auto-updater
+- `Cargo.lock`
+- `Cargo.toml`
+- `src/app.rs`
+- `src/main.rs`
+- `src/updater.rs`
+
 ### `509cf86` · 2026-10-06 · feat: export overrides for framerate, bitrate, resolution (default source)
 - `src/export.rs`
 - `src/app.rs`
