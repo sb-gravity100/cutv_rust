@@ -19,7 +19,7 @@ mod thumbs;
 mod updater;
 mod util;
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{ensure, Result};
 use log::debug;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -167,6 +167,20 @@ fn resolve_path() -> Result<String> {
             eprintln!("Opening: {}", f.file_name().to_string_lossy());
             Ok(path)
         }
-        None => bail!("no video files found — pass a path as argument"),
+        // Nothing in cwd (e.g. `cutv` from home, Start menu): ask instead of erroring.
+        None => {
+            debug!("no video in cwd, showing file picker");
+            match rfd::FileDialog::new()
+                .set_title("Open video")
+                .add_filter("Video", &exts)
+                .pick_file()
+            {
+                Some(p) => Ok(p.to_string_lossy().to_string()),
+                None => {
+                    debug!("file picker cancelled, exiting");
+                    std::process::exit(0);
+                }
+            }
+        }
     }
 }
