@@ -66,6 +66,10 @@ Applying Phase 9's patterns proactively (the `aformat`/`asetnsamples` fixes in `
 
 With this phase, **`ffmpeg`/`ffprobe` on `PATH` is no longer a runtime dependency at all** — every video I/O path in the app goes through the vcpkg-linked FFmpeg libraries in-process. `probe.rs`'s `ffprobe()` JSON-parsing function is gone, and with it `serde_json` (Cargo.toml) and `util::parse_fps` (only ever used to parse `ffprobe`'s `"num/den"` string) — both now genuinely dead, removed. `rodio` remains in `Cargo.toml` unused (vestigial from the pre-GStreamer, pre-Approach-3 audio-player era — see `player.rs`'s doc comment) but wasn't touched; it predates this work and isn't a consequence of it.
 
+## AV1 export speed (2026-10-12)
+
+`libaom-av1` at its defaults (`cpu-used=1`, 1 thread) encodes 1080p at ~1 fps — a 4.5 s cut of an AV1 source took 2m36s. Alternatives ruled out: `av1_nvenc` (needs RTX 40-series; this machine is a 3050) and `libsvtav1` (not in the vcpkg FFmpeg build; would need another ~28 min rebuild). Decision: keep `libaom-av1` but set `cpu-used=8`, `row-mt=1` and `threads=<cores>` (`av1_opts` in `export.rs`); same treatment for `libvpx-vp9`, which has the same slow single-threaded defaults. Revisit `libsvtav1` if this is still too slow.
+
 ## The low-FPS investigation (2026-09-19) — read this before touching playback perf again
 
 After landing GStreamer, playback measured a hard ~8.5-9fps ceiling (should be 30fps for the test source). Investigation, in order:

@@ -166,6 +166,14 @@ Goal: with Phase 9 proving the approach out, finish the job — port the remaini
 - [x] `cargo build --release` and `cargo clippy --release` both clean for all four ported files (two clippy nits fixed: `chunks_exact` → `as_chunks` in `gif.rs`, a collapsible `if`/`if let` in `proxy.rs` via a let-chain).
 - [x] Update `FILE_INDEX.md`, `PLAN.md`, `commits.md`.
 
+## Phase 11 — fast AV1 export (target v0.1.5, 2026-10-12)
+
+Goal: a 4.5 s 1080p30 AV1 cut took 2m36s (~1 fps) in `cutv.log` — `video_enc_spec` mapped AV1 to `libaom-av1` with no speed options (default `cpu-used=1`, single-threaded). RTX 3050 has no AV1 NVENC; the linked vcpkg FFmpeg has only `libaom` for AV1 (no `libsvtav1`). See `PLAN.md`'s "AV1 export speed".
+
+- [x] `export.rs`: `libvpx_opts()` — `cpu-used=8` (AV1) / `4` (VP9), `row-mt=1`, `threads=<available_parallelism>`, plus existing CRF/bitrate opts.
+- [x] Verified with a throwaway `export_test` bin (deleted) on a generated 1080p30 AV1 source: 4.5 s cut took 14.4 s (~9 fps, ~11x faster than the logged 156 s); output valid AV1 1920x1080 + AAC, 4.51 s.
+- [x] Version bump left to the separate release commit (repo convention: `chore: release vX`).
+
 ## Deferred (not scheduled)
 
 - yt-dlp URL download support.
