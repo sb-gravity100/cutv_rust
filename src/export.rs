@@ -91,6 +91,18 @@ fn crf_opts(crf: &str, br_kbps: Option<u64>) -> Dictionary<'static> {
     d
 }
 
+/// libaom-av1 / libvpx-vp9: their defaults are single-threaded and use the
+/// slowest `cpu-used` (AV1 1080p ran at ~1 fps), so set a fast speed preset,
+/// row-based multithreading, and one thread per core.
+fn libvpx_opts(crf: &str, br_kbps: Option<u64>, cpu_used: &str) -> Dictionary<'static> {
+    let mut d = crf_opts(crf, br_kbps);
+    d.set("cpu-used", cpu_used);
+    d.set("row-mt", "1");
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    d.set("threads", &threads.to_string());
+    d
+}
+
 /// Encoder name + options for a source video codec, mirroring the values
 /// previously in the CLI-era `probe::encode_args`. `qscale` is `Some(n)`
 /// for the mpeg4/mpeg2video path, which needs `global_quality`/`QSCALE`
@@ -119,9 +131,9 @@ fn video_enc_spec(id: codec::Id, use_nvenc: bool, br_kbps: Option<u64>) -> Video
         I::HEVC if use_nvenc => ("hevc_nvenc", nvenc_opts(br_kbps, "main"), None),
         I::H264 => ("libx264", cpu_h26x_opts(br_kbps), None),
         I::HEVC => ("libx265", cpu_h26x_opts(br_kbps), None),
-        I::VP9 => ("libvpx-vp9", crf_opts("33", br_kbps), None),
+        I::VP9 => ("libvpx-vp9", libvpx_opts("33", br_kbps, "4"), None),
         I::VP8 => ("libvpx", crf_opts("10", br_kbps), None),
-        I::AV1 => ("libaom-av1", crf_opts("30", br_kbps), None),
+        I::AV1 => ("libaom-av1", libvpx_opts("30", br_kbps, "8"), None),
         I::MPEG4 => ("mpeg4", Dictionary::new(), Some(3)),
         I::MPEG2VIDEO => ("mpeg2video", Dictionary::new(), Some(3)),
         I::PRORES => ("prores_ks", { let mut d = Dictionary::new(); d.set("profile", "3"); d }, None),
