@@ -1,3 +1,11 @@
+### `3390b26` · 2026-10-12 · fix: speed up AV1/VP9 export (cpu-used, row-mt, threads)
+- `src/export.rs`
+- `PHASES.md`
+
+### `07203d8` · 2026-10-12 · docs: plan fast AV1/VP9 export (Phase 11)
+- `PLAN.md`
+- `PHASES.md`
+
 ### `2dc28d5` · 2026-10-06 · docs: README no-arg launch behavior
 - `README.md`
 
