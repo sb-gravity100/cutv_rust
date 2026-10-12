@@ -178,10 +178,10 @@ Goal: a 4.5 s 1080p30 AV1 cut took 2m36s (~1 fps) in `cutv.log` — `video_enc_s
 
 Goal: the "⚙ Export" popup was a tiny 10-11 px panel hanging off the bottom-right edit row. Replace it with a centered, larger-text "Export settings" window, and add a **Normalize codecs** option (checked by default). See `PLAN.md`'s "Normalize codecs".
 
-- [ ] `export.rs`: `ExportOpts.normalize` (manual `Default`, `true`). When set: video forced to H.264 (NVENC else libx264) with `yuv420p` output (inserted `format=yuv420p` filter + encoder pix_fmt), audio AAC (existing mp4 rule); source bitrate is not carried over when the source codec isn't H.264 (quality mode instead).
-- [ ] `app.rs`: `do_cut` output extension `.mp4` when normalizing; `export_open` flag; `ui_export_popup` -> centered `egui::Window` with 15 px text: Compatibility (Normalize codecs checkbox + explanation), Video (Resolution / Framerate / Bitrate as combos + Automatic/Custom), Reset + Done buttons.
-- [ ] Verify with a throwaway `export_test` bin (AV1 1080p source -> normalize -> ffprobe shows h264/yuv420p + aac in .mp4; also a normalize=false cut), delete it.
-- [ ] `FILE_INDEX.md` (export.rs/app.rs descriptions), `commits.md`.
+- [x] `export.rs`: `ExportOpts.normalize` (manual `Default`, `true`). When set: video forced to H.264 (NVENC else libx264) with `yuv420p` output (inserted `format=yuv420p` filter + encoder pix_fmt), audio AAC (existing mp4 rule); source bitrate is not carried over when the source codec isn't H.264 (quality mode instead).
+- [x] `app.rs`: `do_cut` output extension `.mp4` when normalizing; `export_open` flag; `ui_export_popup` -> centered `egui::Window` with 15 px text: Compatibility (Normalize codecs checkbox + explanation), Video (Resolution / Framerate / Bitrate as combos + Automatic/Custom), Reset + Done buttons.
+- [x] Verify with a throwaway `export_test` bin (AV1 1080p source -> normalize -> ffprobe shows h264/yuv420p + aac in .mp4; also a normalize=false cut), delete it. Result: AV1 1080p and 10-bit HEVC/MKV sources both normalize to h264/yuv420p + aac in .mp4. (Unchecked + 10-bit HEVC fails on hevc_nvenc, which rejects yuv420p10le — a pre-existing limitation normalize sidesteps.)
+- [x] `FILE_INDEX.md` (export.rs/app.rs descriptions), `commits.md`.
 
 ## Deferred (not scheduled)
 
