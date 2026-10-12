@@ -1,3 +1,7 @@
+### `d7cdcc7` · 2026-10-13 · chore: release v0.1.5
+- `Cargo.toml`
+- `Cargo.lock`
+
 ### `3390b26` · 2026-10-12 · fix: speed up AV1/VP9 export (cpu-used, row-mt, threads)
 - `src/export.rs`
 - `PHASES.md`
