@@ -1,3 +1,10 @@
+### `adf8810` · 2026-10-13 · fix: crop handles hit-tested at press origin, larger zones, hover highlight
+- `src/app.rs`
+- `src/crop.rs`
+
+### `0a11875` · 2026-10-13 · docs: plan crop box interactivity fix (Phase 13)
+- `PHASES.md`
+
 ### `88ef992` · 2026-10-13 · docs: Phase 12 done, index export settings window
 - `PHASES.md`
 - `FILE_INDEX.md`
