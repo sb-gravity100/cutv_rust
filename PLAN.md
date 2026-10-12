@@ -70,6 +70,10 @@ With this phase, **`ffmpeg`/`ffprobe` on `PATH` is no longer a runtime dependenc
 
 `libaom-av1` at its defaults (`cpu-used=1`, 1 thread) encodes 1080p at ~1 fps — a 4.5 s cut of an AV1 source took 2m36s. Alternatives ruled out: `av1_nvenc` (needs RTX 40-series; this machine is a 3050) and `libsvtav1` (not in the vcpkg FFmpeg build; would need another ~28 min rebuild). Decision: keep `libaom-av1` but set `cpu-used=8`, `row-mt=1` and `threads=<cores>` (`av1_opts` in `export.rs`); same treatment for `libvpx-vp9`, which has the same slow single-threaded defaults. Revisit `libsvtav1` if this is still too slow.
 
+## Normalize codecs (2026-10-13)
+
+Until now a cut kept the source's video codec family (AV1 -> libaom, HEVC -> x265 ...), which is slow for AV1/VP9 and yields files many players/editors/chat apps can't open. `ExportOpts.normalize` (default **on**) instead always outputs **H.264 (yuv420p) + AAC in `.mp4`**; the output extension becomes `.mp4` regardless of the source's. When the source isn't already H.264 its bitrate isn't carried over (codec efficiency differs, AV1 -> H.264 at the same bitrate looks worse), so the encoder runs in its quality mode (NVENC `cq=18` / x264 `crf=18`) unless the user sets a bitrate. Unchecked = the old behavior. The export UI moved from a small popup to a centered "Export settings" window (larger text, plain-language labels) so these options are readable.
+
 ## The low-FPS investigation (2026-09-19) — read this before touching playback perf again
 
 After landing GStreamer, playback measured a hard ~8.5-9fps ceiling (should be 30fps for the test source). Investigation, in order:

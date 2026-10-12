@@ -174,6 +174,15 @@ Goal: a 4.5 s 1080p30 AV1 cut took 2m36s (~1 fps) in `cutv.log` — `video_enc_s
 - [x] Verified with a throwaway `export_test` bin (deleted) on a generated 1080p30 AV1 source: 4.5 s cut took 14.4 s (~9 fps, ~11x faster than the logged 156 s); output valid AV1 1920x1080 + AAC, 4.51 s.
 - [x] Version bump left to the separate release commit (repo convention: `chore: release vX`).
 
+## Phase 12 — friendlier export settings + normalize codecs (target v0.1.6, 2026-10-13)
+
+Goal: the "⚙ Export" popup was a tiny 10-11 px panel hanging off the bottom-right edit row. Replace it with a centered, larger-text "Export settings" window, and add a **Normalize codecs** option (checked by default). See `PLAN.md`'s "Normalize codecs".
+
+- [ ] `export.rs`: `ExportOpts.normalize` (manual `Default`, `true`). When set: video forced to H.264 (NVENC else libx264) with `yuv420p` output (inserted `format=yuv420p` filter + encoder pix_fmt), audio AAC (existing mp4 rule); source bitrate is not carried over when the source codec isn't H.264 (quality mode instead).
+- [ ] `app.rs`: `do_cut` output extension `.mp4` when normalizing; `export_open` flag; `ui_export_popup` -> centered `egui::Window` with 15 px text: Compatibility (Normalize codecs checkbox + explanation), Video (Resolution / Framerate / Bitrate as combos + Automatic/Custom), Reset + Done buttons.
+- [ ] Verify with a throwaway `export_test` bin (AV1 1080p source -> normalize -> ffprobe shows h264/yuv420p + aac in .mp4; also a normalize=false cut), delete it.
+- [ ] `FILE_INDEX.md` (export.rs/app.rs descriptions), `commits.md`.
+
 ## Deferred (not scheduled)
 
 - yt-dlp URL download support.
