@@ -115,13 +115,22 @@ struct VideoEncSpec {
 
 /// User overrides for the cut's output video. Each `None` means "same as
 /// source" (the default) — no extra filter / the source-derived bitrate.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExportOpts {
+    /// Re-encode to H.264 (yuv420p) + AAC in an .mp4 instead of keeping the
+    /// source's codec family. On by default.
+    pub normalize: bool,
     pub fps: Option<f64>,
     pub bitrate_kbps: Option<u64>,
     /// Target output height; width follows the (post-crop) aspect ratio,
     /// rounded to even for encoder compatibility.
     pub height: Option<u32>,
+}
+
+impl Default for ExportOpts {
+    fn default() -> Self {
+        Self { normalize: true, fps: None, bitrate_kbps: None, height: None }
+    }
 }
 
 fn video_enc_spec(id: codec::Id, use_nvenc: bool, br_kbps: Option<u64>) -> VideoEncSpec {
@@ -195,13 +204,18 @@ impl VideoPipe {
             .decoder()
             .video()?;
 
-        let br_kbps = (stream.parameters().bit_rate() > 0)
+        let src_id = stream.parameters().id();
+        // Normalizing to H.264: a non-H.264 source's bitrate doesn't carry
+        // over (e.g. AV1 is ~2x as efficient), so use quality mode instead.
+        let carry_src_br = !opts.normalize || src_id == codec::Id::H264;
+        let br_kbps = (carry_src_br && stream.parameters().bit_rate() > 0)
             .then(|| (stream.parameters().bit_rate() as u64 / 1000).max(100));
         let br_kbps = match opts.bitrate_kbps {
             Some(b) => { debug!("export: bitrate override {b} kbps (source {br_kbps:?})"); Some(b.max(100)) }
             None => br_kbps,
         };
-        let spec = video_enc_spec(stream.parameters().id(), use_nvenc, br_kbps);
+        let enc_id = if opts.normalize { codec::Id::H264 } else { src_id };
+        let spec = video_enc_spec(enc_id, use_nvenc, br_kbps);
 
         let enc_codec = ff::encoder::find_by_name(spec.name)
             .ok_or_else(|| anyhow!("no video encoder registered for {}", spec.name))?;
@@ -226,7 +240,10 @@ impl VideoPipe {
         if let Some((w, h)) = scaled { debug!("export: scaling to {w}x{h}"); }
         enc_ctx.set_width(out_w);
         enc_ctx.set_height(out_h);
-        enc_ctx.set_format(decoder.format());
+        // Normalized output is always 8-bit 4:2:0 (what H.264 players expect;
+        // NVENC H.264 can't take 10-bit / 4:4:4 anyway).
+        let to_420 = opts.normalize && decoder.format() != format::Pixel::YUV420P;
+        enc_ctx.set_format(if opts.normalize { format::Pixel::YUV420P } else { decoder.format() });
         enc_ctx.set_aspect_ratio(decoder.aspect_ratio());
         enc_ctx.set_time_base(stream.time_base());
 
@@ -260,6 +277,10 @@ impl VideoPipe {
             // stream time_base the encoder/muxer were configured with.
             let tb = stream.time_base();
             vf.push(format!("fps={fps:.6},settb={}/{}", tb.numerator(), tb.denominator()));
+        }
+        if to_420 {
+            debug!("export: normalize, converting {:?} -> yuv420p", decoder.format());
+            vf.push("format=yuv420p".to_string());
         }
         let graph = if vf.is_empty() {
             None
