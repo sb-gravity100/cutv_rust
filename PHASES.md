@@ -183,6 +183,14 @@ Goal: the "⚙ Export" popup was a tiny 10-11 px panel hanging off the bottom-ri
 - [x] Verify with a throwaway `export_test` bin (AV1 1080p source -> normalize -> ffprobe shows h264/yuv420p + aac in .mp4; also a normalize=false cut), delete it. Result: AV1 1080p and 10-bit HEVC/MKV sources both normalize to h264/yuv420p + aac in .mp4. (Unchecked + 10-bit HEVC fails on hevc_nvenc, which rejects yuv420p10le — a pre-existing limitation normalize sidesteps.)
 - [x] `FILE_INDEX.md` (export.rs/app.rs descriptions), `commits.md`.
 
+## Phase 13 — crop box interactivity (target v0.1.6, 2026-10-13)
+
+Bug: crop handles sometimes can't be grabbed. Cause: `ui_crop_overlay` hit-tested at `drag_started()`, which egui fires only after the pointer has moved past a drag threshold, so `interact_pointer_pos()` is already several px away from the press point and often outside the 10 px handle zone (worst on thin edges).
+
+- [x] `app.rs`: hit-test at the **press origin** (`pointer.press_origin()`), not the post-threshold position.
+- [x] `crop.rs`: larger hit zone (14 px), shrunk automatically on small crops so the body stays grabbable; visible handles larger, with hover/active highlight.
+- [x] `FILE_INDEX.md` unchanged (no files added); `commits.md`.
+
 ## Deferred (not scheduled)
 
 - yt-dlp URL download support.
