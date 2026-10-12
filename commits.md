@@ -1,3 +1,17 @@
+### `88ef992` · 2026-10-13 · docs: Phase 12 done, index export settings window
+- `PHASES.md`
+- `FILE_INDEX.md`
+
+### `457a976` · 2026-10-13 · feat: centered, larger export settings window with normalize toggle
+- `src/app.rs`
+
+### `2dbffab` · 2026-10-13 · feat: normalize codecs export option (H.264 + AAC in MP4, default on)
+- `src/export.rs`
+
+### `36bec5e` · 2026-10-13 · docs: plan normalize codecs + friendlier export settings (Phase 12)
+- `PLAN.md`
+- `PHASES.md`
+
 ### `d7cdcc7` · 2026-10-13 · chore: release v0.1.5
 - `Cargo.toml`
 - `Cargo.lock`
