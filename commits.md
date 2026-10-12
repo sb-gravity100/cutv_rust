@@ -1,3 +1,7 @@
+### `4ad925a` · 2026-10-13 · chore: release v0.1.6
+- `Cargo.toml`
+- `Cargo.lock`
+
 ### `adf8810` · 2026-10-13 · fix: crop handles hit-tested at press origin, larger zones, hover highlight
 - `src/app.rs`
 - `src/crop.rs`
