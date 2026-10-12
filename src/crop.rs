@@ -80,6 +80,9 @@ pub fn canvas_to_source_delta(canvas: Rect, src_w: u32, src_h: u32, canvas_delta
 /// Corners win over edges win over the body (so a corner is grabbable even
 /// though it's technically also "near" two edges).
 pub fn hit_test(canvas_crop: Rect, p: Pos2, handle_r: f32) -> Option<Handle> {
+    // On a small crop rect, full-size zones would swallow the whole body;
+    // cap at a third of the shorter side so Move stays reachable.
+    let handle_r = handle_r.min(canvas_crop.width().min(canvas_crop.height()) / 3.0).max(4.0);
     let (l, r, t, b) = (canvas_crop.left(), canvas_crop.right(), canvas_crop.top(), canvas_crop.bottom());
     let near = |a: f32, v: f32| (a - v).abs() <= handle_r;
     let in_x = p.x >= l - handle_r && p.x <= r + handle_r;
@@ -135,7 +138,10 @@ pub fn cursor_for(handle: Handle) -> egui::CursorIcon {
 
 /// Draws the crop overlay: dims everything outside the crop rect, then an
 /// accent border and a small square at each handle position.
-pub fn draw(painter: &egui::Painter, canvas: Rect, canvas_crop: Rect, accent: egui::Color32) {
+pub fn draw(
+    painter: &egui::Painter, canvas: Rect, canvas_crop: Rect, accent: egui::Color32,
+    active: Option<Handle>,
+) {
     let dim = egui::Color32::from_black_alpha(140);
     // Four bands covering the area outside canvas_crop, clipped to canvas.
     painter.rect_filled(Rect::from_min_max(canvas.min, pos2(canvas.max.x, canvas_crop.min.y)), 0.0, dim); // top
@@ -145,14 +151,19 @@ pub fn draw(painter: &egui::Painter, canvas: Rect, canvas_crop: Rect, accent: eg
 
     painter.rect_stroke(canvas_crop, 0.0, egui::Stroke::new(1.5, accent));
 
-    let hs = 5.0; // handle half-size
+    let hs = 7.0; // handle half-size
     let pts = [
-        canvas_crop.left_top(), canvas_crop.right_top(),
-        canvas_crop.left_bottom(), canvas_crop.right_bottom(),
-        pos2(canvas_crop.center().x, canvas_crop.top()), pos2(canvas_crop.center().x, canvas_crop.bottom()),
-        pos2(canvas_crop.left(), canvas_crop.center().y), pos2(canvas_crop.right(), canvas_crop.center().y),
+        (Handle::Nw, canvas_crop.left_top()), (Handle::Ne, canvas_crop.right_top()),
+        (Handle::Sw, canvas_crop.left_bottom()), (Handle::Se, canvas_crop.right_bottom()),
+        (Handle::N, pos2(canvas_crop.center().x, canvas_crop.top())),
+        (Handle::S, pos2(canvas_crop.center().x, canvas_crop.bottom())),
+        (Handle::W, pos2(canvas_crop.left(), canvas_crop.center().y)),
+        (Handle::E, pos2(canvas_crop.right(), canvas_crop.center().y)),
     ];
-    for p in pts {
-        painter.rect_filled(Rect::from_center_size(p, vec2(hs * 2.0, hs * 2.0)), 1.0, accent);
+    for (h, p) in pts {
+        let r = Rect::from_center_size(p, vec2(hs * 2.0, hs * 2.0));
+        let fill = if active == Some(h) { egui::Color32::WHITE } else { accent };
+        painter.rect_filled(r, 2.0, fill);
+        painter.rect_stroke(r, 2.0, egui::Stroke::new(1.0, egui::Color32::from_black_alpha(200)));
     }
 }

@@ -705,13 +705,18 @@ impl CutvApp {
     /// the same click-and-drag response `ui_video` allocated for the whole
     /// video area, reused here rather than allocating a second one.
     fn ui_crop_overlay(&mut self, ui: &mut egui::Ui, rect: Rect, resp: &egui::Response) {
-        const HANDLE_R: f32 = 10.0;
+        const HANDLE_R: f32 = 14.0;
         let Some(crop_r) = self.crop_rect else { return };
         let canvas_crop = crop::to_canvas(rect, self.src_w, self.src_h, crop_r);
 
         if resp.drag_started() {
-            if let Some(p) = resp.interact_pointer_pos() {
+            // egui reports drag_started only after the pointer has moved past
+            // its drag threshold, so test where the button went *down* —
+            // the current position may already be outside a thin handle.
+            let p = ui.input(|i| i.pointer.press_origin()).or_else(|| resp.interact_pointer_pos());
+            if let Some(p) = p {
                 self.crop_drag = crop::hit_test(canvas_crop, p, HANDLE_R);
+                debug!("crop drag start at {p:?} -> {:?}", self.crop_drag);
             }
         }
         if resp.dragged() {
@@ -736,7 +741,10 @@ impl CutvApp {
         }
 
         let canvas_crop = crop::to_canvas(rect, self.src_w, self.src_h, self.crop_rect.unwrap_or(crop_r));
-        crop::draw(ui.painter(), rect, canvas_crop, C_IN);
+        let active = self.crop_drag.or_else(|| {
+            resp.hover_pos().and_then(|p| crop::hit_test(canvas_crop, p, HANDLE_R))
+        });
+        crop::draw(ui.painter(), rect, canvas_crop, C_IN, active);
     }
 
     fn ui_timeline(&mut self, ui: &mut egui::Ui) {
